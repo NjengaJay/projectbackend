@@ -19,35 +19,41 @@ class IntentClassifier:
     def __init__(self):
         """Initialize the intent classifier with default patterns."""
         self.patterns = {
-            'route_query': [
+            'find_route': [
                 'how do i get', 'how to get', 'route', 'way', 'path', 'travel', 'journey',
                 'directions', 'navigate'
             ],
-            'accessibility_query': [
+            'get_accessibility': [
                 'wheelchair', 'accessible', 'disability', 'disabled', 'mobility',
                 'step-free', 'assistance', 'accessibility'
             ],
-            'cost_query': [
+            'get_cost': [
                 'cost', 'price', 'fare', 'ticket', 'cheap', 'expensive', 'budget',
                 'how much'
             ],
-            'time_query': [
+            'get_time': [
                 'time', 'duration', 'long', 'fast', 'quick', 'schedule', 'when',
                 'how long'
             ],
-            'hotel_query': [
+            'find_hotel': [
                 'hotel', 'stay', 'accommodation', 'place to stay', 'lodging', 'room',
                 'where to stay', 'book a room'
             ],
-            'attraction_query': [
+            'find_attraction': [
                 'tourist', 'attraction', 'visit', 'see', 'sightseeing', 'museum',
                 'landmark', 'places to go', 'places to see', 'things to do'
             ],
-            'info_query': [
+            'get_review': [
+                'review', 'rating', 'opinion', 'think', 'recommend', 'good',
+                'bad', 'worth', 'how is', 'what do people'
+            ],
+            'get_info': [
                 'info', 'information', 'about', 'tell', 'what', 'explain',
                 'describe', 'details', 'where', 'which'
             ]
         }
+        
+        # Load Dutch cities data
         self.dutch_cities = [
             'amsterdam', 'rotterdam', 'utrecht', 'den haag', 'eindhoven',
             'groningen', 'tilburg', 'almere', 'breda', 'nijmegen'
@@ -59,7 +65,7 @@ class IntentClassifier:
         
         # Define patterns for each intent
         patterns = {
-            "review_query": [
+            "get_review": [
                 r"(what|how).*(people|travelers|tourists).*(think|say|rate)",
                 r"(review|rating|opinion|feedback|experience).*",
                 r".*\b(good|bad|rated|reviewed)\b.*",
@@ -69,14 +75,14 @@ class IntentClassifier:
                 r".*how.*like.*",    # Catch "How do people like X"
                 r".*opinion.*on.*"   # Catch "Opinion on X"
             ],
-            "cost_query": [
+            "get_cost": [
                 r"(how much|cost|price|fare).*(from|to|between)",
                 r"(ticket|travel|journey).*(cost|price|fare)",
                 r"(cost|price|fare).*(ticket|travel|journey)",
                 r".*\bhow much\b.*\b(from|to)\b.*",
                 r".*\bcost\b.*\b(from|to)\b.*"
             ],
-            "route_query": [
+            "find_route": [
                 r"(how|way|route|path).*(to get|to travel|to go)",
                 r"(from|between).*(to|and).*(route|path|direction)",
                 r"(find|show|get).*(route|path|direction|way)",
@@ -84,7 +90,7 @@ class IntentClassifier:
                 r".*\bhow (do|can|should) (i|we) (travel|go)\b.*",
                 r".*\b(from|between) .* (to|and)\b.*"
             ],
-            "attraction_query": [
+            "find_attraction": [
                 r"(what|where|which|show me|find|suggest).*(museum|gallery|park|garden|restaurant|landmark|monument|statue|tower|cathedral|church|attraction|place)",
                 r"(museum|gallery|park|garden|restaurant|landmark|monument|statue|tower|cathedral|church|attraction|place).*(to (visit|see|explore|go to))",
                 r"(best|top|popular|recommended).*(museum|gallery|park|garden|restaurant|landmark|monument|statue|tower|cathedral|church|attraction|place)"
@@ -108,11 +114,11 @@ class IntentClassifier:
                     confidence = (match_length / len(text)) * (1 - match_position / len(text))
                     
                     # Give higher confidence to cost queries when they match
-                    if intent == "cost_query":
+                    if intent == "get_cost":
                         confidence *= 1.2
                     
                     # Give higher confidence to review queries with "think about" pattern
-                    if intent == "review_query" and "think about" in text:
+                    if intent == "get_review" and "think about" in text:
                         confidence *= 1.3
                         
                     # Debug logging

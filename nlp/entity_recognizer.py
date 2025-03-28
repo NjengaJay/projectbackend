@@ -26,14 +26,19 @@ class EntityRecognizer:
             else:
                 ruler = self.nlp.get_pipe("entity_ruler")
             
-            # Location patterns
+            # Location patterns for Dutch cities
             ruler.add_patterns([
-                {"label": "LOCATION", "pattern": "London"},
-                {"label": "LOCATION", "pattern": "Paris"},
-                {"label": "LOCATION", "pattern": "Berlin"},
-                {"label": "LOCATION", "pattern": "Rome"},
-                {"label": "LOCATION", "pattern": "Madrid"},
-                {"label": "LOCATION", "pattern": "Amsterdam"}
+                {"label": "LOCATION", "pattern": "Amsterdam"},
+                {"label": "LOCATION", "pattern": "Rotterdam"},
+                {"label": "LOCATION", "pattern": "Utrecht"},
+                {"label": "LOCATION", "pattern": "Den Haag"},
+                {"label": "LOCATION", "pattern": "The Hague"},
+                {"label": "LOCATION", "pattern": "Eindhoven"},
+                {"label": "LOCATION", "pattern": "Groningen"},
+                {"label": "LOCATION", "pattern": "Tilburg"},
+                {"label": "LOCATION", "pattern": "Almere"},
+                {"label": "LOCATION", "pattern": "Breda"},
+                {"label": "LOCATION", "pattern": "Nijmegen"}
             ])
             
             # Attraction type patterns
@@ -54,15 +59,19 @@ class EntityRecognizer:
                 {"label": "ATTRACTION_TYPE", "pattern": "landmarks"}
             ])
             
-            # Attraction patterns
+            # Dutch attraction patterns
             ruler.add_patterns([
-                {"label": "ATTRACTION", "pattern": "Louvre"},
-                {"label": "ATTRACTION", "pattern": "British Museum"},
-                {"label": "ATTRACTION", "pattern": "Eiffel Tower"},
-                {"label": "ATTRACTION", "pattern": "Tower Bridge"},
-                {"label": "ATTRACTION", "pattern": "Colosseum"},
                 {"label": "ATTRACTION", "pattern": "Rijksmuseum"},
-                {"label": "ATTRACTION", "pattern": "Prado Museum"}
+                {"label": "ATTRACTION", "pattern": "Van Gogh Museum"},
+                {"label": "ATTRACTION", "pattern": "Anne Frank House"},
+                {"label": "ATTRACTION", "pattern": "Royal Palace"},
+                {"label": "ATTRACTION", "pattern": "NEMO Science Museum"},
+                {"label": "ATTRACTION", "pattern": "Artis Zoo"},
+                {"label": "ATTRACTION", "pattern": "Vondelpark"},
+                {"label": "ATTRACTION", "pattern": "Maritime Museum"},
+                {"label": "ATTRACTION", "pattern": "Keukenhof Gardens"},
+                {"label": "ATTRACTION", "pattern": "Efteling"},
+                {"label": "ATTRACTION", "pattern": "Madurodam"}
             ])
             
             # Transport mode patterns
@@ -158,56 +167,36 @@ class EntityRecognizer:
                 
         return accessibility
         
-    def extract_entities(self, text: str) -> Dict[str, Any]:
-        """Extract travel-related entities from text."""
-        try:
-            # Process text
-            doc = self.nlp(text.lower())
+    def extract_entities(self, text: str) -> Dict[str, str]:
+        """Extract entities from text."""
+        doc = self.nlp(text)
+        entities = {}
+        
+        # Extract locations (looking for two locations for route queries)
+        locations = [ent.text for ent in doc.ents if ent.label_ == "LOCATION"]
+        if len(locations) >= 2:
+            entities["origin"] = locations[0]
+            entities["destination"] = locations[1]
+        elif len(locations) == 1:
+            # For attraction queries, single location is the target
+            entities["location"] = locations[0]
+        
+        # Extract attraction types
+        attraction_types = [ent.text for ent in doc.ents if ent.label_ == "ATTRACTION_TYPE"]
+        if attraction_types:
+            entities["attraction_type"] = attraction_types[0]
+        
+        # Extract specific attractions
+        attractions = [ent.text for ent in doc.ents if ent.label_ == "ATTRACTION"]
+        if attractions:
+            entities["attraction"] = attractions[0]
+        
+        # Extract transport modes
+        transport_modes = [ent.text for ent in doc.ents if ent.label_ == "TRANSPORT_MODE"]
+        if transport_modes:
+            entities["transport_mode"] = transport_modes[0]
             
-            # Extract entities
-            entities = {}
-            
-            # Extract locations
-            locations = self._extract_locations(doc)
-            if locations:
-                if locations.get("start_location"):
-                    entities["start_location"] = locations["start_location"]
-                if locations.get("end_location"):
-                    entities["end_location"] = locations["end_location"]
-                if not locations.get("start_location") and not locations.get("end_location"):
-                    entities["location"] = next(iter(locations.values()))
-            
-            # Extract transport mode
-            mode = self._extract_transport_mode(doc)
-            if mode:
-                entities["transport_mode"] = mode
-            
-            # Extract attraction type
-            attraction_type = self._extract_attraction_type(doc)
-            if attraction_type:
-                entities["attraction_type"] = attraction_type
-            
-            # Extract attraction name
-            attraction = self._extract_attraction(doc)
-            if attraction:
-                entities["attraction"] = attraction
-            
-            # Extract monetary amounts
-            max_cost = self._extract_money(text)
-            if max_cost:
-                entities["max_cost"] = max_cost
-                
-            # Extract accessibility features
-            accessibility = self._extract_accessibility(doc)
-            if accessibility:
-                entities["accessibility_features"] = accessibility
-                
-            logger.info(f"Extracted entities: {entities}")
-            return entities
-            
-        except Exception as e:
-            logger.error(f"Error extracting entities: {str(e)}", exc_info=True)
-            return {}
+        return entities
             
     def save_model(self, model_path: str):
         """
