@@ -1,5 +1,5 @@
 """
-Enhanced sentiment analyzer for TripAdvisor reviews
+Enhanced sentiment analyzer for TripAdvisor reviews with lazy loading
 """
 
 import os
@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, NamedTuple
 from textblob import TextBlob
 import spacy
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -23,241 +24,123 @@ class TripAdvisorSentimentAnalyzer:
     
     def __init__(self, model_path: str = "models"):
         """Initialize sentiment analyzer."""
-        try:
-            # Load sentiment words
-            self.sentiment_words = self._load_sentiment_words(model_path)
+        self.model_path = model_path
+        self.nlp = None  # Lazy load
+        self.sentiment_words = None  # Lazy load
+        
+        # Set default thresholds
+        self.positive_threshold = 0.6
+        self.negative_threshold = -0.6
+                
+        # Load sentiment lexicons
+        self.positive_words = {
+            # General positive terms
+            'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic',
+            'perfect', 'best', 'awesome', 'outstanding', 'superb', 'lovely',
+            'beautiful', 'brilliant', 'exceptional', 'marvelous', 'delightful',
             
-            # Set default thresholds
-            self.positive_threshold = 0.6
-            self.negative_threshold = -0.6
+            # Travel-specific positive terms
+            'comfortable', 'clean', 'spacious', 'convenient', 'helpful',
+            'friendly', 'welcoming', 'scenic', 'peaceful', 'relaxing',
+            'authentic', 'charming', 'cozy', 'luxurious', 'modern',
+        }
+        
+        self.negative_words = {
+            # General negative terms
+            'bad', 'poor', 'terrible', 'horrible', 'awful', 'disappointing',
+            'worst', 'unpleasant', 'mediocre', 'subpar', 'inadequate',
             
+            # Travel-specific negative terms
+            'dirty', 'noisy', 'crowded', 'expensive', 'uncomfortable',
+            'unfriendly', 'rude', 'unsafe', 'boring', 'overpriced'
+        }
+        
+        # Aspect categories and their related terms
+        self.aspects = {
+            'service': {
+                'service', 'staff', 'employee', 'waiter', 'receptionist',
+                'manager', 'host', 'hospitality', 'assistance', 'help'
+            },
+            'cleanliness': {
+                'clean', 'dirty', 'hygiene', 'sanitary', 'spotless',
+                'pristine', 'mess', 'dust', 'stain', 'maintenance'
+            },
+            'location': {
+                'location', 'area', 'neighborhood', 'distance', 'central',
+                'accessible', 'nearby', 'convenient', 'close', 'far'
+            },
+            'comfort': {
+                'comfort', 'comfortable', 'bed', 'quiet', 'noise',
+                'spacious', 'cramped', 'cozy', 'temperature', 'amenities'
+            },
+            'value': {
+                'value', 'price', 'worth', 'expensive', 'cheap',
+                'reasonable', 'cost', 'affordable', 'overpriced', 'bargain'
+            }
+        }
+        
+        # Intensity modifiers and their weights
+        self.intensity_modifiers = {
+            'very': 1.5,
+            'really': 1.5,
+            'extremely': 2.0,
+            'incredibly': 2.0,
+            'super': 1.5,
+            'quite': 1.2,
+            'somewhat': 0.8,
+            'slightly': 0.6,
+            'not': -1.0,
+            "n't": -1.0,
+            'never': -1.0
+        }
+    
+    @lru_cache(maxsize=1)
+    def _get_nlp(self):
+        """Lazy load spaCy model"""
+        if self.nlp is None:
             try:
                 self.nlp = spacy.load("en_core_web_sm")
             except OSError:
                 logger.warning("Could not load spaCy model. Using basic tokenization.")
-                self.nlp = None
-                
-            # Load sentiment lexicons
-            self.positive_words = {
-                # General positive terms
-                'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic',
-                'perfect', 'best', 'awesome', 'outstanding', 'superb', 'lovely',
-                'beautiful', 'brilliant', 'exceptional', 'marvelous', 'delightful',
-                
-                # Travel-specific positive terms
-                'comfortable', 'clean', 'spacious', 'convenient', 'helpful',
-                'friendly', 'welcoming', 'scenic', 'peaceful', 'relaxing',
-                'authentic', 'charming', 'cozy', 'luxurious', 'modern',
-                
-                # Service-related positive terms
-                'attentive', 'professional', 'efficient', 'prompt', 'courteous',
-                'accommodating', 'knowledgeable', 'responsive', 'reliable'
-            }
-            
-            self.negative_words = {
-                # General negative terms
-                'bad', 'poor', 'terrible', 'awful', 'horrible', 'disappointing',
-                'worst', 'unacceptable', 'mediocre', 'subpar', 'inadequate',
-                
-                # Travel-specific negative terms
-                'dirty', 'uncomfortable', 'noisy', 'crowded', 'expensive',
-                'inconvenient', 'broken', 'outdated', 'smelly', 'unsafe',
-                'unclean', 'cramped', 'rundown', 'overpriced',
-                
-                # Service-related negative terms
-                'rude', 'unhelpful', 'slow', 'unresponsive', 'unprofessional',
-                'incompetent', 'negligent', 'careless', 'unfriendly'
-            }
-            
-            # Aspect categories and their related terms
-            self.aspects = {
-                'service': {
-                    'service', 'staff', 'employee', 'waiter', 'receptionist',
-                    'manager', 'host', 'hospitality', 'assistance', 'help'
-                },
-                'cleanliness': {
-                    'clean', 'dirty', 'hygiene', 'sanitary', 'spotless',
-                    'pristine', 'mess', 'dust', 'stain', 'maintenance'
-                },
-                'location': {
-                    'location', 'area', 'neighborhood', 'distance', 'central',
-                    'accessible', 'nearby', 'convenient', 'close', 'far'
-                },
-                'comfort': {
-                    'comfort', 'comfortable', 'bed', 'quiet', 'noise',
-                    'spacious', 'cramped', 'cozy', 'temperature', 'amenities'
-                },
-                'value': {
-                    'value', 'price', 'worth', 'expensive', 'cheap',
-                    'reasonable', 'cost', 'affordable', 'overpriced', 'bargain'
-                }
-            }
-            
-            # Intensity modifiers and their weights
-            self.intensity_modifiers = {
-                'very': 1.5,
-                'really': 1.5,
-                'extremely': 2.0,
-                'incredibly': 2.0,
-                'super': 1.5,
-                'quite': 1.2,
-                'somewhat': 0.8,
-                'slightly': 0.6,
-                'not': -1.0,
-                "n't": -1.0,
-                'never': -1.0
-            }
-            
-            logger.info("Successfully initialized sentiment analyzer")
-            
-        except Exception as e:
-            logger.error(f"Error initializing sentiment analyzer: {str(e)}", exc_info=True)
-            raise
-            
-    def _load_sentiment_words(self, model_path: str) -> Dict[str, float]:
-        """Load sentiment words from file or use defaults."""
-        try:
-            # Try to load from file
-            sentiment_path = os.path.join(model_path, "sentiment_words.json")
-            if os.path.exists(sentiment_path):
-                with open(sentiment_path, 'r') as f:
-                    return json.load(f)
-            
-            # Use default sentiment words
-            return {
-                # Positive words
-                "amazing": 1.0,
-                "awesome": 1.0,
-                "excellent": 1.0,
-                "fantastic": 1.0,
-                "great": 0.8,
-                "good": 0.6,
-                "nice": 0.6,
-                "wonderful": 0.8,
-                "beautiful": 0.8,
-                "enjoyed": 0.7,
-                "recommend": 0.7,
-                "worth": 0.6,
-                "perfect": 0.9,
-                "love": 0.9,
-                "best": 0.9,
-                
-                # Negative words
-                "terrible": -1.0,
-                "awful": -1.0,
-                "horrible": -1.0,
-                "bad": -0.6,
-                "poor": -0.6,
-                "disappointing": -0.7,
-                "waste": -0.8,
-                "avoid": -0.8,
-                "dirty": -0.6,
-                "expensive": -0.5,
-                "crowded": -0.4,
-                "overrated": -0.7,
-                "boring": -0.6,
-                "hate": -0.9,
-                "worst": -0.9
-            }
-            
-        except Exception as e:
-            logger.error(f"Error loading sentiment words: {str(e)}", exc_info=True)
-            raise
-            
-    def save_model(self, model_path: str):
-        """
-        Save model data to disk
-        
-        Args:
-            model_path: Directory to save model files
-        """
-        try:
-            # Create model directory if it doesn't exist
-            os.makedirs(model_path, exist_ok=True)
-            
-            # Save sentiment words and aspects
-            sentiment_words_path = os.path.join(model_path, "sentiment_words.json")
-            with open(sentiment_words_path, 'w') as f:
-                json.dump({
-                    "positive_words": list(self.positive_words),
-                    "negative_words": list(self.negative_words),
-                    "aspects": {k: list(v) for k, v in self.aspects.items()},
-                    "intensity_modifiers": self.intensity_modifiers
-                }, f)
-                
-            logger.info(f"Successfully saved model to {model_path}")
-            
-        except Exception as e:
-            logger.error(f"Error saving model: {str(e)}", exc_info=True)
-            raise
-            
-    def load_model(self, model_path: str):
-        """
-        Load model data from disk
-        
-        Args:
-            model_path: Directory containing model files
-        """
-        try:
-            # Load sentiment words and aspects
-            sentiment_words_path = os.path.join(model_path, "sentiment_words.json")
-            with open(sentiment_words_path, 'r') as f:
-                data = json.load(f)
-                self.positive_words = set(data["positive_words"])
-                self.negative_words = set(data["negative_words"])
-                self.aspects = {k: set(v) for k, v in data["aspects"].items()}
-                self.intensity_modifiers = data["intensity_modifiers"]
-                
-            logger.info(f"Successfully loaded model from {model_path}")
-            
-        except Exception as e:
-            logger.error(f"Error loading model: {str(e)}", exc_info=True)
-            logger.warning("Using default sentiment words and aspects")
-            
+        return self.nlp
+    
+    @lru_cache(maxsize=1)
+    def _load_sentiment_words(self):
+        """Lazy load sentiment words"""
+        if self.sentiment_words is None:
+            try:
+                sentiment_path = Path(self.model_path) / "sentiment_words.json"
+                if sentiment_path.exists():
+                    with open(sentiment_path, "r", encoding="utf-8") as f:
+                        self.sentiment_words = json.load(f)
+            except Exception as e:
+                logger.warning(f"Could not load sentiment words: {e}")
+                self.sentiment_words = {}
+        return self.sentiment_words
+    
     def analyze_sentiment(self, text: str) -> float:
-        """
-        Analyze sentiment of text
-        
-        Args:
-            text: Text to analyze
-            
-        Returns:
-            Sentiment score between -1 (negative) and 1 (positive)
-        """
+        """Analyze sentiment of text and return score between 0 and 1"""
         try:
-            # For testing, return mock sentiment based on positive/negative word count
-            positive_words = {
-                "amazing", "great", "excellent", "good", "wonderful", 
-                "fantastic", "awesome", "love", "enjoy", "beautiful",
-                "impressive", "helpful", "worth", "recommended"
-            }
+            # Only load NLP when needed
+            nlp = self._get_nlp()
+            sentiment_words = self._load_sentiment_words()
             
-            negative_words = {
-                "bad", "poor", "terrible", "awful", "horrible",
-                "disappointing", "waste", "avoid", "crowded", "expensive",
-                "rude", "dirty", "broken", "slow", "boring"
-            }
+            if not text:
+                return 0.5  # Neutral sentiment for empty text
             
-            # Normalize text
-            text = text.lower()
-            words = set(text.split())
+            # Use TextBlob for initial sentiment
+            blob = TextBlob(text)
+            sentiment_score = (blob.sentiment.polarity + 1) / 2  # Convert to 0-1 range
             
-            # Count positive and negative words
-            pos_count = len(words.intersection(positive_words))
-            neg_count = len(words.intersection(negative_words))
+            # Apply min/max thresholds
+            sentiment_score = max(0.1, min(0.9, sentiment_score))
             
-            # Calculate sentiment score between -1 and 1
-            total = pos_count + neg_count
-            if total == 0:
-                return 0.0
-                
-            sentiment = (pos_count - neg_count) / total
-            return max(min(sentiment, 1.0), -1.0)  # Clamp between -1 and 1
+            return sentiment_score
             
         except Exception as e:
-            logger.error(f"Error analyzing sentiment: {str(e)}", exc_info=True)
-            return 0.0  # Neutral sentiment on error
-
+            logger.error(f"Error analyzing sentiment: {str(e)}")
+            return 0.5  # Return neutral sentiment on error
+    
     def analyze(self, text: str) -> SentimentScore:
         """
         Analyze sentiment in the given text using enhanced approach.
@@ -269,14 +152,21 @@ class TripAdvisorSentimentAnalyzer:
             SentimentScore with overall score, confidence, and aspect scores
         """
         try:
+            # Only load NLP when needed
+            nlp = self._get_nlp()
+            sentiment_words = self._load_sentiment_words()
+            
+            if not text:
+                return SentimentScore(score=0.5, confidence=0.5, aspect_scores={})  # Neutral sentiment for empty text
+            
             # Use TextBlob for base sentiment
             blob = TextBlob(text)
             base_score = blob.sentiment.polarity
             base_confidence = abs(base_score)  # Higher magnitude = higher confidence
             
             # Tokenize text
-            if self.nlp:
-                doc = self.nlp(text.lower())
+            if nlp:
+                doc = nlp(text.lower())
                 tokens = [token.text for token in doc]
                 lemmas = [token.lemma_ for token in doc]
             else:
@@ -347,3 +237,53 @@ class TripAdvisorSentimentAnalyzer:
         except Exception as e:
             logger.error(f"Error in sentiment analysis: {str(e)}", exc_info=True)
             return SentimentScore(score=0.0, confidence=0.0, aspect_scores={})
+    
+    def save_model(self, model_path: str):
+        """
+        Save model data to disk
+        
+        Args:
+            model_path: Directory to save model files
+        """
+        try:
+            # Create model directory if it doesn't exist
+            os.makedirs(model_path, exist_ok=True)
+            
+            # Save sentiment words and aspects
+            sentiment_words_path = os.path.join(model_path, "sentiment_words.json")
+            with open(sentiment_words_path, 'w') as f:
+                json.dump({
+                    "positive_words": list(self.positive_words),
+                    "negative_words": list(self.negative_words),
+                    "aspects": {k: list(v) for k, v in self.aspects.items()},
+                    "intensity_modifiers": self.intensity_modifiers
+                }, f)
+                
+            logger.info(f"Successfully saved model to {model_path}")
+            
+        except Exception as e:
+            logger.error(f"Error saving model: {str(e)}", exc_info=True)
+            raise
+            
+    def load_model(self, model_path: str):
+        """
+        Load model data from disk
+        
+        Args:
+            model_path: Directory containing model files
+        """
+        try:
+            # Load sentiment words and aspects
+            sentiment_words_path = os.path.join(model_path, "sentiment_words.json")
+            with open(sentiment_words_path, 'r') as f:
+                data = json.load(f)
+                self.positive_words = set(data["positive_words"])
+                self.negative_words = set(data["negative_words"])
+                self.aspects = {k: set(v) for k, v in data["aspects"].items()}
+                self.intensity_modifiers = data["intensity_modifiers"]
+                
+            logger.info(f"Successfully loaded model from {model_path}")
+            
+        except Exception as e:
+            logger.error(f"Error loading model: {str(e)}", exc_info=True)
+            logger.warning("Using default sentiment words and aspects")

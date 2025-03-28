@@ -2,9 +2,10 @@
 Enhanced chatbot handler with sentiment analysis and recommendation integration
 """
 import logging
-from typing import Dict, Any, Optional, Tuple, List
-from .nlp.sentiment_analyzer import TripAdvisorSentimentAnalyzer
-from ..recommender.hybrid_recommender import HybridRecommender
+from typing import Dict, Optional, Tuple, List, Any
+from nlp.sentiment_analyzer import TripAdvisorSentimentAnalyzer
+from nlp.nlp_data_models import NLPResponse
+from recommender.hybrid_recommender import HybridRecommender
 import spacy
 import os
 
@@ -13,20 +14,42 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ChatbotHandler:
-    def __init__(self):
-        """Initialize chatbot with sentiment analysis and recommender"""
+    def __init__(self, init_recommender: bool = False):
+        """
+        Initialize chatbot with sentiment analysis and recommender
+        
+        Args:
+            init_recommender: If True, initialize the recommender system immediately.
+                            If False, it will be initialized on first use.
+        """
         self.sentiment_analyzer = TripAdvisorSentimentAnalyzer()
         self.nlp = spacy.load("en_core_web_sm")
+        self.recommender = None
         
-        # Initialize recommender
-        data_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "..",
-            "Databases for training",
-            "gtfs_nl",
-            "pois_with_mobility.csv"
-        )
+        if init_recommender:
+            self.initialize_recommender()
+    
+    def initialize_recommender(self, data_path: Optional[str] = None) -> None:
+        """
+        Initialize the recommender system with optional custom data path
+        
+        Args:
+            data_path: Optional path to the POIs data file. If None, uses default path.
+        """
+        if self.recommender is not None:
+            logger.info("Recommender system already initialized")
+            return
+            
+        if data_path is None:
+            data_path = os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "..",
+                "Databases for training",
+                "gtfs_nl",
+                "pois_with_mobility.csv"
+            )
+        
         self.recommender = HybridRecommender()
         self.recommender.fit(data_path)
         logger.info("Initialized recommender system")
@@ -42,6 +65,10 @@ class ChatbotHandler:
             
             # Check for recommendation intent
             if any(word.text in ["recommend", "suggestion", "suggest", "find"] for word in doc):
+                # Initialize recommender if needed
+                if self.recommender is None:
+                    self.initialize_recommender()
+                    
                 # Extract location and preferences
                 location, preferences = self._extract_recommendation_params(doc)
                 

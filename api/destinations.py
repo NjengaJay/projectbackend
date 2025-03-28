@@ -40,7 +40,15 @@ def get_destinations():
     try:
         # Get destinations from database
         db_destinations = Destination.query.all()
-        return jsonify([dest.to_dict() for dest in db_destinations])
+        destinations_data = [dest.to_dict() for dest in db_destinations]
+        
+        # Add additional fields from hardcoded data if available
+        for dest in destinations_data:
+            dest['accessibility_features'] = []
+            dest['activities'] = []
+            dest['type'] = 'city'  # default type
+            
+        return jsonify(destinations_data)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -51,6 +59,13 @@ def get_destination(destination_id):
         destination = Destination.query.get(destination_id)
         if not destination:
             return jsonify({'error': 'Destination not found'}), 404
-        return jsonify(destination.to_dict())
+            
+        dest_data = destination.to_dict()
+        # Add additional fields
+        dest_data['accessibility_features'] = []
+        dest_data['activities'] = []
+        dest_data['type'] = 'city'  # default type
+        
+        return jsonify(dest_data)
     except Exception as e:
         return jsonify({'error': str(e)}), 500

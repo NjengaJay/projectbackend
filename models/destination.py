@@ -10,6 +10,9 @@ class Destination(db.Model):
     image_url = db.Column(db.String(500))
     budget_range = db.Column(db.String(100))
     best_time_to_visit = db.Column(db.String(200))
+    accessibility_features = db.Column(db.JSON)  # New field
+    activities = db.Column(db.JSON)  # New field
+    type = db.Column(db.String(50))  # New field
     
     # Relationships
     trips = db.relationship('Trip', backref='destination', lazy=True)
@@ -22,5 +25,8 @@ class Destination(db.Model):
             'description': self.description,
             'image_url': self.image_url,
             'budget_range': self.budget_range,
-            'best_time_to_visit': self.best_time_to_visit
+            'best_time_to_visit': self.best_time_to_visit,
+            'accessibility_features': self.accessibility_features or [],
+            'activities': self.activities or [],
+            'type': self.type or 'city'
         }

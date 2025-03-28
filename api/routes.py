@@ -1,18 +1,33 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from datetime import datetime
 from . import db
 from .models import User, Trip, Destination, Review
 from .chatbot_handler import ChatbotHandler
+from nlp.sentiment_analyzer import TripAdvisorSentimentAnalyzer
 
 # Create blueprints
 auth_bp = Blueprint('auth', __name__)
 chatbot_bp = Blueprint('chatbot', __name__)
 travel_bp = Blueprint('travel', __name__)
 nlp_bp = Blueprint('nlp', __name__)
+recommendation_bp = Blueprint('recommendation', __name__)
 
-# Initialize chatbot handler
-chatbot = ChatbotHandler()
+# Initialize handlers lazily
+chatbot = None
+sentiment_analyzer = None
+
+def get_chatbot():
+    global chatbot
+    if chatbot is None:
+        chatbot = ChatbotHandler(init_recommender=False)
+    return chatbot
+
+def get_sentiment_analyzer():
+    global sentiment_analyzer
+    if sentiment_analyzer is None:
+        sentiment_analyzer = TripAdvisorSentimentAnalyzer()
+    return sentiment_analyzer
 
 @auth_bp.route('/register', methods=['POST'])
 def register():
@@ -105,7 +120,7 @@ def chat():
             return jsonify({'error': 'No message provided'}), 400
             
         # Process message
-        result = chatbot.process_message(message)
+        result = get_chatbot().process_message(message)
         
         if not result['success']:
             return jsonify({'error': result['error']}), 500
@@ -186,6 +201,27 @@ def plan_trip():
 
 # NLP routes
 @nlp_bp.route('/analyze', methods=['POST'])
+def analyze_text():
+    """Analyze text using NLP models"""
+    try:
+        data = request.get_json()
+        text = data.get('text')
+        
+        if not text:
+            return jsonify({'error': 'No text provided'}), 400
+            
+        # Analyze sentiment
+        sentiment_score = get_sentiment_analyzer().analyze_sentiment(text)
+        
+        return jsonify({
+            'sentiment': sentiment_score,
+            'success': True
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@nlp_bp.route('/analyze', methods=['POST'])
 @jwt_required()
 def analyze_query():
     """Analyze a travel-related query using NLP"""
@@ -260,7 +296,7 @@ def update_preferences():
         data = request.get_json()
         
         # Save preferences
-        chatbot.save_user_preferences(get_jwt_identity(), data)
+        get_chatbot().save_user_preferences(get_jwt_identity(), data)
         
         return jsonify({'message': 'Preferences updated successfully'})
         

@@ -26,11 +26,6 @@ class HybridRecommender:
             n_clusters: Number of clusters for K-Means (default: 8)
         """
         self.n_clusters = n_clusters
-        self.kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-        self.feature_scaler = StandardScaler()
-        self.location_scaler = MinMaxScaler()
-        self.tfidf = TfidfVectorizer(stop_words='english')
-        self.nn_model = NearestNeighbors(n_neighbors=10, metric='cosine')
         
         # Store processed data
         self.pois_df = None
@@ -43,8 +38,12 @@ class HybridRecommender:
         self.mobility_columns = None
         self.feature_dimensions = None
         
-        # Initialize models
-        self.kmeans = KMeans(n_clusters=self.n_clusters, random_state=42)
+        # Initialize models with explicit parameters
+        self.kmeans = KMeans(
+            n_clusters=self.n_clusters,
+            random_state=42,
+            n_init=10  # Explicitly set to avoid warning
+        )
         self.feature_scaler = StandardScaler()
         self.location_scaler = MinMaxScaler()
         self.tfidf = TfidfVectorizer(stop_words='english')
