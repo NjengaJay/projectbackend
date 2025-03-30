@@ -1,7 +1,10 @@
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy.sql import func
-from . import db
+from flask_sqlalchemy import SQLAlchemy
+
+# Create the SQLAlchemy instance
+db = SQLAlchemy()
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -38,6 +41,12 @@ class User(db.Model):
             'is_admin': self.is_admin
         }
 
+# Association table for many-to-many relationship between trips and destinations
+trip_destinations = db.Table('trip_destinations',
+    db.Column('trip_id', db.Integer, db.ForeignKey('trips.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('destination_id', db.Integer, db.ForeignKey('destinations.id', ondelete='CASCADE'), primary_key=True)
+)
+
 class Trip(db.Model):
     __tablename__ = 'trips'
     
@@ -58,9 +67,9 @@ class Trip(db.Model):
     total_cost = db.Column(db.Float)  # Estimated total cost
     notes = db.Column(db.JSON)  # User notes and reminders
     
-    # Relationships
-    destinations = db.relationship('Destination', secondary='trip_destinations', 
-                                 backref=db.backref('trips', lazy='dynamic'))
+    # Relationship with destinations through the association table
+    destinations = db.relationship('Destination', secondary=trip_destinations,
+                                 back_populates='trips')
     
     def to_dict(self):
         return {
@@ -81,14 +90,6 @@ class Trip(db.Model):
             'destinations': [dest.to_dict() for dest in self.destinations]
         }
 
-# Association table for many-to-many relationship between trips and destinations
-trip_destinations = db.Table('trip_destinations',
-    db.Column('trip_id', db.Integer, db.ForeignKey('trips.id', ondelete='CASCADE'), primary_key=True),
-    db.Column('destination_id', db.Integer, db.ForeignKey('destinations.id', ondelete='CASCADE'), primary_key=True),
-    db.Column('order', db.Integer),  # Order of destinations in the trip
-    db.Column('duration', db.Integer)  # Duration of stay in days
-)
-
 class Destination(db.Model):
     __tablename__ = 'destinations'
     
@@ -104,9 +105,9 @@ class Destination(db.Model):
     latitude = db.Column(db.Float)
     longitude = db.Column(db.Float)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    trips = db.relationship('Trip', secondary=trip_destinations,
+                          back_populates='destinations')
     
-    trips = db.relationship('Trip', secondary='trip_destinations', 
-                            backref=db.backref('destinations', lazy='dynamic'))
     reviews = db.relationship('Review', backref='destination', lazy=True, cascade='all, delete-orphan')
     accommodation = db.relationship('Accommodation', backref='destination', uselist=False, cascade='all, delete-orphan')
     
@@ -124,55 +125,6 @@ class Destination(db.Model):
             'latitude': self.latitude,
             'longitude': self.longitude,
             'created_at': self.created_at.isoformat() if self.created_at else None
-        }
-
-class Accommodation(db.Model):
-    __tablename__ = 'accommodations'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False, index=True)
-    type = db.Column(db.String(50), index=True)  # hotel, hostel, apartment, etc.
-    city = db.Column(db.String(100), index=True)
-    description = db.Column(db.Text)
-    latitude = db.Column(db.Float)
-    longitude = db.Column(db.Float)
-    
-    # Additional fields for detailed information
-    price_range = db.Column(db.JSON)  # {'min': float, 'max': float, 'currency': str}
-    room_types = db.Column(db.JSON)  # List of available room types
-    amenities = db.Column(db.JSON)  # List of amenities
-    star_rating = db.Column(db.Float)  # Hotel star rating (1-5)
-    review_score = db.Column(db.Float)  # Average review score
-    review_count = db.Column(db.Integer)  # Number of reviews
-    booking_conditions = db.Column(db.JSON)  # Booking policies and conditions
-    
-    accessibility_features = db.Column(db.JSON)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Link to the original POI if it exists
-    destination_id = db.Column(db.Integer, db.ForeignKey('destinations.id', ondelete='SET NULL'), nullable=True)
-    
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'name': self.name,
-            'type': self.type,
-            'city': self.city,
-            'description': self.description,
-            'latitude': self.latitude,
-            'longitude': self.longitude,
-            'price_range': self.price_range,
-            'room_types': self.room_types or [],
-            'amenities': self.amenities or [],
-            'star_rating': self.star_rating,
-            'review_score': self.review_score,
-            'review_count': self.review_count,
-            'booking_conditions': self.booking_conditions or {},
-            'accessibility_features': self.accessibility_features or [],
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-            'destination_id': self.destination_id
         }
 
 class Review(db.Model):
@@ -200,3 +152,98 @@ class Review(db.Model):
             'sentiment_score': self.sentiment_score,
             'created_at': self.created_at.isoformat()
         }
+
+class Accommodation(db.Model):
+    __tablename__ = 'accommodations'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False, index=True)
+    type = db.Column(db.String(50), index=True)  # hotel, hostel, apartment, etc.
+    city = db.Column(db.String(100), index=True)
+    description = db.Column(db.Text)
+    
+    latitude = db.Column(db.Float)
+    longitude = db.Column(db.Float)
+    
+    # Additional fields for detailed information
+    price_range = db.Column(db.Text)  # Store as string, handle JSON in route
+    room_types = db.Column(db.Text)  # Store as string, handle JSON in route
+    amenities = db.Column(db.Text)  # Store as string, handle JSON in route
+    star_rating = db.Column(db.Float)  # Hotel star rating (1-5)
+    review_score = db.Column(db.Float)  # Average review score
+    review_count = db.Column(db.Integer)  # Number of reviews
+    booking_conditions = db.Column(db.Text)  # Store as string, handle JSON in route
+    accessibility_features = db.Column(db.Text)  # Store as string, handle JSON in route
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Link to the original POI if it exists
+    destination_id = db.Column(db.Integer, db.ForeignKey('destinations.id', ondelete='SET NULL'), nullable=True)
+    
+    def to_dict(self):
+        """Convert accommodation to dictionary with safe JSON handling"""
+        from json import loads, JSONDecodeError
+        
+        def safe_json_loads(value, default=None):
+            if not value:
+                return default
+            try:
+                return loads(value) if isinstance(value, str) else value
+            except (JSONDecodeError, TypeError):
+                return default
+                
+        return {
+            'id': self.id,
+            'name': self.name,
+            'type': self.type,
+            'country': 'Netherlands',  # Hardcode country since all accommodations are in Netherlands
+            'city': self.city,
+            'description': self.description,
+            'latitude': self.latitude,
+            'longitude': self.longitude,
+            'price_range': safe_json_loads(self.price_range, {}),
+            'room_types': safe_json_loads(self.room_types, []),
+            'amenities': safe_json_loads(self.amenities, []),
+            'star_rating': self.star_rating,
+            'review_score': self.review_score,
+            'review_count': self.review_count,
+            'booking_conditions': safe_json_loads(self.booking_conditions, []),
+            'accessibility_features': safe_json_loads(self.accessibility_features, {}),
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'destination_id': self.destination_id
+        }
+
+class ChatMessage(db.Model):
+    __tablename__ = 'chat_messages'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    session_id = db.Column(db.String(100), nullable=False, index=True)
+    content = db.Column(db.Text, nullable=False)
+    role = db.Column(db.String(20), nullable=False)  # 'user' or 'assistant'
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'session_id': self.session_id,
+            'content': self.content,
+            'role': self.role,
+            'created_at': self.created_at.isoformat()
+        }
+
+class ChatSession(db.Model):
+    __tablename__ = 'chat_sessions'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    context = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    messages = db.relationship('ChatMessage', backref='session', lazy=True,
+                             primaryjoin="and_(ChatSession.session_id==ChatMessage.session_id)",
+                             foreign_keys=[ChatMessage.session_id],
+                             cascade='all, delete-orphan')

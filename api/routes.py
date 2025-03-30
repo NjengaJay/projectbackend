@@ -2,9 +2,10 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from datetime import datetime
 from . import db
-from .models import User, Trip, Destination, Review
+from .models import User, Trip, Destination, Review, Accommodation
 from .chatbot_handler import ChatbotHandler
 from nlp.sentiment_analyzer import TripAdvisorSentimentAnalyzer
+import json
 
 # Create blueprints
 auth_bp = Blueprint('auth', __name__)
@@ -12,6 +13,7 @@ chatbot_bp = Blueprint('chatbot', __name__)
 travel_bp = Blueprint('travel', __name__)
 nlp_bp = Blueprint('nlp', __name__)
 recommendation_bp = Blueprint('recommendation', __name__)
+accommodation_bp = Blueprint('accommodation', __name__)
 
 # Initialize handlers lazily
 chatbot = None
@@ -299,6 +301,176 @@ def update_preferences():
         get_chatbot().save_user_preferences(get_jwt_identity(), data)
         
         return jsonify({'message': 'Preferences updated successfully'})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def calculate_price_range(star_rating):
+    """Calculate price range based on star rating"""
+    star_rating = float(star_rating) if star_rating else 3.0
+    base_price = 50 + star_rating * 25
+    max_price = base_price * 2
+    return {
+        'min': int(base_price),
+        'max': int(max_price)
+    }
+
+@accommodation_bp.route('/api/accommodations', methods=['GET'])
+@jwt_required()
+def get_accommodations():
+    try:
+        # Get query parameters
+        search_term = request.args.get('search', '').lower()
+        location = request.args.get('location', '')
+        min_price = float(request.args.get('min_price', 0))
+        max_price = float(request.args.get('max_price', float('inf')))
+        
+        # Get accessibility filters
+        accessibility = request.args.get('accessibility', '')
+        accessibility_filters = json.loads(accessibility) if accessibility else {}
+        
+        # Get accommodation type filters
+        acc_type = request.args.get('type', '')
+        type_filters = json.loads(acc_type) if acc_type else {}
+        
+        # Base query
+        query = Accommodation.query
+        
+        # Apply search filter
+        if search_term:
+            query = query.filter(
+                (Accommodation.name.ilike(f'%{search_term}%')) |
+                (Accommodation.description.ilike(f'%{search_term}%'))
+            )
+        
+        # Apply location filter
+        if location:
+            query = query.filter(Accommodation.city.ilike(f'%{location}%'))
+        
+        # Apply price filter
+        query = query.filter(
+            (Accommodation.price_per_night >= min_price) &
+            (Accommodation.price_per_night <= max_price)
+        )
+        
+        # Apply accessibility filters
+        if accessibility_filters:
+            for feature, value in accessibility_filters.items():
+                if value:
+                    query = query.filter(
+                        Accommodation.accessibility_features.like(f'%{feature}%')
+                    )
+        
+        # Apply type filters
+        if type_filters:
+            type_conditions = [
+                Accommodation.type.ilike(f'%{acc_type}%')
+                for acc_type, selected in type_filters.items()
+                if selected
+            ]
+            if type_conditions:
+                query = query.filter(db.or_(*type_conditions))
+        
+        # Execute query with pagination
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        paginated_results = query.paginate(page=page, per_page=per_page)
+        
+        # Format results
+        accommodations = []
+        for acc in paginated_results.items:
+            # Calculate price range based on star rating
+            price_range = calculate_price_range(acc.star_rating)
+
+            # Generate room types based on price range
+            room_types = [
+                {
+                    'name': 'Standard Room',
+                    'price': price_range['min'],
+                    'description': 'Comfortable room with basic amenities'
+                },
+                {
+                    'name': 'Deluxe Room',
+                    'price': int((price_range['min'] + price_range['max']) / 2),
+                    'description': 'Spacious room with premium amenities'
+                },
+                {
+                    'name': 'Suite',
+                    'price': price_range['max'],
+                    'description': 'Luxury suite with separate living area'
+                }
+            ]
+
+            acc_data = {
+                'id': acc.id,
+                'name': acc.name,
+                'description': acc.description,
+                'type': acc.type,
+                'city': acc.city,
+                'country': acc.country,
+                'price_range': price_range,
+                'room_types': room_types,
+                'star_rating': float(acc.star_rating) if acc.star_rating else None,
+                'review_score': float(acc.review_score) if acc.review_score else None,
+                'image_url': 'https://images.unsplash.com/photo-1566073771259-6a8506099945?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
+                'accessibility_features': json.loads(acc.accessibility_features) if acc.accessibility_features else {},
+                'amenities': json.loads(acc.amenities) if acc.amenities else []
+            }
+            accommodations.append(acc_data)
+        
+        return jsonify({
+            'accommodations': accommodations,
+            'total': paginated_results.total,
+            'pages': paginated_results.pages,
+            'current_page': page
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@accommodation_bp.route('/api/accommodations/<int:id>', methods=['GET'])
+@jwt_required()
+def get_accommodation(id):
+    try:
+        accommodation = Accommodation.query.get_or_404(id)
+        
+        # Calculate price range based on star rating
+        price_range = calculate_price_range(accommodation.star_rating)
+
+        # Generate room types based on price range
+        room_types = [
+            {
+                'name': 'Standard Room',
+                'price': price_range['min'],
+                'description': 'Comfortable room with basic amenities'
+            },
+            {
+                'name': 'Deluxe Room',
+                'price': int((price_range['min'] + price_range['max']) / 2),
+                'description': 'Spacious room with premium amenities'
+            },
+            {
+                'name': 'Suite',
+                'price': price_range['max'],
+                'description': 'Luxury suite with separate living area'
+            }
+        ]
+        
+        return jsonify({
+            'id': accommodation.id,
+            'name': accommodation.name,
+            'description': accommodation.description,
+            'type': accommodation.type,
+            'city': accommodation.city,
+            'country': accommodation.country,
+            'price_range': price_range,
+            'room_types': room_types,
+            'star_rating': float(accommodation.star_rating) if accommodation.star_rating else None,
+            'review_score': float(accommodation.review_score) if accommodation.review_score else None,
+            'image_url': 'https://images.unsplash.com/photo-1566073771259-6a8506099945?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
+            'accessibility_features': json.loads(accommodation.accessibility_features) if accommodation.accessibility_features else {},
+            'amenities': json.loads(accommodation.amenities) if accommodation.amenities else []
+        })
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500

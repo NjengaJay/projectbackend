@@ -91,31 +91,40 @@ class HybridRecommender:
         """
         logger.info("Loading and preprocessing POIs data...")
         
-        # Load data
-        df = pd.read_csv(data_path)
-        logger.info(f"Loaded dataset with {len(df)} rows and {len(df.columns)} columns")
-        logger.info(f"Available columns: {sorted(df.columns.tolist())}")
-        
-        # Handle missing values for core features
-        core_features = ['opening_hours', 'wheelchair', 'tourism']
-        for feature in core_features:
-            if feature in df.columns:
-                df[feature] = df[feature].fillna('unknown')
-                logger.info(f"Found column {feature} with {df[feature].nunique()} unique values")
-            else:
-                df[feature] = 'unknown'
-                logger.warning(f"Column {feature} not found in dataset, using default value")
-        
-        # Create feature text for TF-IDF
-        df['feature_text'] = df.apply(lambda row: ' '.join(
-            str(row[col]) for col in ['tourism', 'name', 'city']
-            if col in df.columns and pd.notna(row.get(col, None))
-        ), axis=1)
-        
-        logger.info(f"Sample feature text: {df['feature_text'].iloc[0]}")
-        
-        self.pois_df = df
-        return df
+        try:
+            # Load data
+            logger.info(f"Attempting to load data from: {data_path}")
+            logger.info(f"File exists: {os.path.exists(data_path)}")
+            logger.info(f"Absolute path: {os.path.abspath(data_path)}")
+            
+            df = pd.read_csv(data_path)
+            logger.info(f"Successfully loaded dataset with {len(df)} rows and {len(df.columns)} columns")
+            logger.info(f"Available columns: {sorted(df.columns.tolist())}")
+            
+            # Handle missing values for core features
+            core_features = ['opening_hours', 'wheelchair', 'tourism']
+            for feature in core_features:
+                if feature in df.columns:
+                    df[feature] = df[feature].fillna('unknown')
+                    logger.info(f"Found column {feature} with {df[feature].nunique()} unique values")
+                else:
+                    df[feature] = 'unknown'
+                    logger.warning(f"Column {feature} not found in dataset, using default value")
+            
+            # Create feature text for TF-IDF
+            df['feature_text'] = df.apply(lambda row: ' '.join(
+                str(row[col]) for col in ['tourism', 'name', 'city']
+                if col in df.columns and pd.notna(row.get(col, None))
+            ), axis=1)
+            
+            logger.info(f"Sample feature text: {df['feature_text'].iloc[0]}")
+            
+            self.pois_df = df
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error preprocessing data: {str(e)}", exc_info=True)
+            raise
         
     def extract_features(self, df: pd.DataFrame) -> np.ndarray:
         """

@@ -1,14 +1,9 @@
-"""
-Travel Assistant module that integrates NLP and travel planning capabilities.
-"""
-
 import logging
-import os
-import re
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Tuple, Union, Any
 from pathlib import Path
 
+# Use relative imports for local packages
 from .nlp.text_processor import TextProcessor
 from .nlp.intent_classifier import IntentClassifier
 from .nlp.entity_recognizer import EntityRecognizer
@@ -18,24 +13,22 @@ import spacy
 
 logger = logging.getLogger(__name__)
 
-nlp = spacy.load("en_core_web_sm")
-
-@dataclass
-class TravelQuery:
-    """A processed travel query with intent and entities."""
-    text: str
-    intent: str
-    entities: Dict[str, Any]
-    confidence: float = 0.0
+# Load spaCy model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    logger.warning("Downloading language model for the spaCy POS tagger")
+    from spacy.cli import download
+    download("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
 
 @dataclass
 class TravelResponse:
-    """Response object for travel-related queries."""
+    """Class to structure travel assistant responses."""
+    text: str
     intent: Optional[str] = None
     entities: Dict = field(default_factory=dict)
-    text: Optional[str] = None
     route: Optional[Dict] = None
-    cost: Optional[float] = None
     reviews: List[Dict] = field(default_factory=list)
     error: Optional[str] = None
     attractions: List[Dict] = field(default_factory=list)
@@ -44,11 +37,10 @@ class TravelResponse:
     def to_dict(self) -> Dict:
         """Convert response to dictionary."""
         return {
+            'text': self.text,
             'intent': self.intent,
             'entities': self.entities,
-            'text': self.text,
             'route': self.route,
-            'cost': self.cost,
             'reviews': self.reviews,
             'error': self.error,
             'attractions': self.attractions,
@@ -56,209 +48,121 @@ class TravelResponse:
         }
 
 class TravelAssistant:
-    """Assistant for handling travel-related queries."""
+    """Main class for processing travel-related queries and generating responses."""
     
-    def __init__(self, model_path=None):
-        """Initialize the travel assistant."""
-        # Initialize components
-        self.travel_planner = TravelPlanner()
+    def __init__(self):
+        """Initialize the travel assistant components."""
+        self.text_processor = TextProcessor()  # Removed nlp parameter since it's not needed
         self.intent_classifier = IntentClassifier()
-        self.entity_recognizer = EntityRecognizer()
+        self.entity_recognizer = EntityRecognizer(nlp)
         self.sentiment_analyzer = TripAdvisorSentimentAnalyzer()
+        self.travel_planner = TravelPlanner()
         
-        # Set thresholds
-        self.intent_threshold = 0.5
-        self.sentiment_threshold = 0.5
+    def process_message(self, message: str, preferences: Dict = None, user_id: str = None) -> TravelResponse:
+        """
+        Process an incoming message and generate a response.
         
-        # Load models if path provided
-        if model_path:
-            model_path = Path(model_path)
-            if (model_path / "entity_model").exists():
-                self.entity_recognizer.load_model(str(model_path / "entity_model"))
-            if (model_path / "sentiment_model").exists():
-                self.sentiment_analyzer.load_model(str(model_path / "sentiment_model"))
-        
-        self.conversation_state = {}
-        
-        # Define greeting patterns
-        self.greeting_patterns = [
-            r'\b(hi|hello|hey|greetings|good morning|good afternoon|good evening)\b',
-            r'\bhow are you\b',
-            r'\bnice to meet you\b'
-        ]
-        
-    def is_greeting(self, query: str) -> bool:
-        """Check if the query is a greeting."""
-        query = query.lower()
-        return any(re.search(pattern, query) for pattern in self.greeting_patterns)
-        
-    def get_greeting_response(self) -> TravelResponse:
-        """Generate a greeting response."""
-        response = TravelResponse()
-        response.text = "Hello! I'm your Dutch travel assistant. I can help you find routes between cities, suggest attractions, and provide travel information in the Netherlands. How can I help you today?"
-        return response
-
-    def process_query(self, query: str) -> TravelResponse:
-        """Process a user query and return a response."""
-        # Create response object
-        response = TravelResponse()
-        
+        Args:
+            message: The user's message
+            preferences: Optional user preferences for travel planning
+            user_id: Optional user ID for personalization
+            
+        Returns:
+            TravelResponse object containing the response and related data
+        """
         try:
-            # Check if it's a greeting
-            if self.is_greeting(query):
-                return self.get_greeting_response()
+            # Process text
+            processed_text = self.text_processor.process(message)
             
             # Classify intent
-            intent, confidence = self.intent_classifier.classify(query)
+            intent = self.intent_classifier.classify(processed_text)
             
-            # Set the intent
-            response.intent = intent if confidence > self.intent_threshold else "unknown"
+            # Extract entities
+            entities = self.entity_recognizer.extract_entities(processed_text)
             
-            # Handle unknown intent
-            if response.intent == "unknown":
-                response.error = "I'm sorry, I don't understand your query. Could you please rephrase it?"
-                return response
+            # Initialize response
+            response = TravelResponse(
+                text="I'm sorry, I couldn't understand your request.",
+                intent=intent,
+                entities=entities
+            )
             
-            # Extract entities based on intent
-            entities = self.entity_recognizer.extract_entities(query)
-            response.entities = entities
-            
-            # Validate Dutch locations
-            dutch_cities = ['amsterdam', 'rotterdam', 'utrecht', 'den haag', 'eindhoven', 'groningen', 'tilburg', 'almere', 'breda', 'nijmegen']
-            
-            def validate_location(location: str) -> bool:
-                """Check if location is a Dutch city."""
-                if not location:
-                    return False
-                return location.lower() in dutch_cities
-            
-            # Process based on intent
-            if response.intent == "find_route":
-                origin = entities.get("origin")
-                destination = entities.get("destination")
+            # Handle different intents
+            if intent == "route_query":
+                route = self.travel_planner.plan_route(
+                    entities.get("locations", []),
+                    TravelPreferences(**preferences) if preferences else None
+                )
+                response.route = route
+                response.text = self._format_route_response(route)
                 
-                if not origin or not destination:
-                    response.error = "Missing required information: Please specify both origin and destination cities"
-                    return response
+            elif intent == "review_query":
+                reviews = self.travel_planner.get_reviews(entities.get("location"))
+                sentiment = self.sentiment_analyzer.analyze_reviews(reviews)
+                response.reviews = reviews
+                response.sentiment = sentiment
+                response.text = self._format_review_response(reviews, sentiment)
                 
-                if not validate_location(origin):
-                    response.error = f"Origin '{origin}' is not a valid Dutch city"
-                    return response
-                    
-                if not validate_location(destination):
-                    response.error = f"Destination '{destination}' is not a valid Dutch city"
-                    return response
+            elif intent == "attraction_query":
+                attractions = self.travel_planner.get_attractions(
+                    entities.get("location"),
+                    preferences.get("interests") if preferences else None
+                )
+                response.attractions = attractions
+                response.text = self._format_attraction_response(attractions)
                 
-                # For now, return mock route data
-                mock_route = {
-                    "origin": origin,
-                    "destination": destination,
-                    "duration": "2 hours",
-                    "distance": "150 km",
-                    "steps": [
-                        f"Take train from {origin}",
-                        "Change at Utrecht Centraal",
-                        f"Arrive at {destination}"
-                    ]
-                }
-                response.route = mock_route
-                response.text = f"Here's the route from {origin.title()} to {destination.title()}"
-                
-            elif response.intent == "get_cost":
-                origin = entities.get("origin")
-                destination = entities.get("destination")
-                
-                if not origin or not destination:
-                    response.error = "Missing required information: Please specify both origin and destination cities"
-                    return response
-                
-                if not validate_location(origin):
-                    response.error = f"Origin '{origin}' is not a valid Dutch city"
-                    return response
-                    
-                if not validate_location(destination):
-                    response.error = f"Destination '{destination}' is not a valid Dutch city"
-                    return response
-                
-                # For now, return mock route and cost data
-                mock_route = {
-                    "origin": origin,
-                    "destination": destination,
-                    "duration": "2 hours",
-                    "distance": "150 km",
-                    "steps": [
-                        f"Take train from {origin}",
-                        "Change at Utrecht Centraal",
-                        f"Arrive at {destination}"
-                    ]
-                }
-                response.route = mock_route
-                response.cost = 25.0
-                response.text = f"The cost from {origin.title()} to {destination.title()} is €25.00"
-                
-            elif response.intent == "find_attraction":
-                location = entities.get("location")
-                attraction_type = entities.get("attraction_type", "any")
-                
-                if not location:
-                    response.error = "Missing required information: Please specify a city to find attractions in"
-                    return response
-                
-                if not validate_location(location):
-                    response.error = f"Location '{location}' is not a valid Dutch city"
-                    return response
-                
-                # Mock attractions data for Dutch cities
-                mock_attractions = [
-                    {
-                        "name": "Rijksmuseum",
-                        "type": "museum",
-                        "city": "Amsterdam",
-                        "rating": 4.8,
-                        "reviews": [
-                            {"text": "World-class art collection!", "rating": 5},
-                            {"text": "Beautiful building and exhibits", "rating": 5},
-                            {"text": "Must-visit in Amsterdam", "rating": 4}
-                        ]
-                    },
-                    {
-                        "name": "Van Gogh Museum",
-                        "type": "museum",
-                        "city": "Amsterdam",
-                        "rating": 4.7,
-                        "reviews": [
-                            {"text": "Amazing collection of Van Gogh", "rating": 5},
-                            {"text": "Well organized museum", "rating": 4},
-                            {"text": "Fascinating artwork", "rating": 5}
-                        ]
-                    }
-                ]
-                
-                response.attractions = mock_attractions
-                response.reviews = mock_attractions[0]["reviews"]
-                response.text = f"Here are some {attraction_type} to visit in {location.title()}"
-                
-            elif response.intent == "get_review":
-                attraction = entities.get("attraction")
-                
-                if not attraction:
-                    response.error = "Missing required information: Please specify an attraction to get reviews for"
-                    return response
-                
-                # Mock review data for Dutch attractions
-                mock_reviews = [
-                    {"text": "World-class art collection!", "rating": 5},
-                    {"text": "Beautiful building and exhibits", "rating": 5},
-                    {"text": "Must-visit in Amsterdam", "rating": 4}
-                ]
-                
-                response.reviews = mock_reviews
-                response.sentiment = "positive"  # Add sentiment
-                response.text = f"Here are some reviews for {attraction}"
-            
             return response
             
         except Exception as e:
-            logger.error(f"Error processing query: {str(e)}", exc_info=True)
-            response.error = str(e)
-            return response
+            logger.error(f"Error processing message: {str(e)}")
+            return TravelResponse(
+                text="I apologize, but I encountered an error while processing your request.",
+                error=str(e)
+            )
+    
+    def _format_route_response(self, route: Dict) -> str:
+        """Format route data into a readable response."""
+        if not route:
+            return "I couldn't find a suitable route for your request."
+        # Add your route formatting logic here
+        return "Here's your route: [Route formatting to be implemented]"
+    
+    def _format_review_response(self, reviews: List[Dict], sentiment: str) -> str:
+        """Format review data into a readable response."""
+        if not reviews:
+            return "I couldn't find any reviews for that location."
+        # Add your review formatting logic here
+        return f"Here are some reviews (Overall sentiment: {sentiment}): [Review formatting to be implemented]"
+    
+    def _format_attraction_response(self, attractions: List[Dict]) -> str:
+        """Format attraction data into a readable response."""
+        if not attractions:
+            return "I couldn't find any attractions for that location."
+        # Add your attraction formatting logic here
+        return "Here are some attractions you might enjoy: [Attraction formatting to be implemented]"
+
+# Create a singleton instance
+_travel_assistant = None
+
+def get_travel_assistant() -> TravelAssistant:
+    """Get or create the singleton TravelAssistant instance."""
+    global _travel_assistant
+    if _travel_assistant is None:
+        _travel_assistant = TravelAssistant()
+    return _travel_assistant
+
+def generate_response(message: str, preferences: Dict = None, user_id: str = None) -> str:
+    """
+    Generate a response to a user message using the travel assistant.
+    
+    Args:
+        message: The user's message
+        preferences: Optional user preferences for travel planning
+        user_id: Optional user ID for personalization
+        
+    Returns:
+        A string containing the response message
+    """
+    assistant = get_travel_assistant()
+    response = assistant.process_message(message, preferences, user_id)
+    return response.text

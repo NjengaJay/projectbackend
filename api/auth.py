@@ -2,8 +2,7 @@ from flask import Blueprint, request, jsonify, current_app
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import jwt
-from models import db
-from models.user import User
+from models import db, User
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -45,6 +44,7 @@ def register():
         
     except Exception as e:
         db.session.rollback()
+        print(f"Registration error: {str(e)}")  # Debug logging
         return jsonify({'message': str(e)}), 500
 
 @auth_bp.route('/login', methods=['POST'])

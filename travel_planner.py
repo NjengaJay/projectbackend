@@ -3,31 +3,26 @@ Travel planner module for route planning and recommendations
 """
 
 import logging
-from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass
 from enum import Enum
+from typing import Dict, List, Optional, Any, Tuple
+import json
+import os
 import networkx as nx
-import math
-
-from .recommender.hybrid_recommender import HybridRecommender
+from recommender.hybrid_recommender import HybridRecommender
 
 logger = logging.getLogger(__name__)
 
-class RoutePreference(Enum):
-    """Route preference options"""
+class RoutePreference(str, Enum):
     TIME = "time"
     COST = "cost"
     SCENIC = "scenic"
 
 @dataclass
 class TravelPreferences:
-    """Container for travel preferences"""
-    route_preference: RoutePreference
+    route_preference: RoutePreference = RoutePreference.TIME
     accessibility_required: bool = False
-    max_cost: Optional[float] = None
-    scenic_priority: float = 0.0
-    time_weight: float = 0.5
-    cost_weight: float = 0.5
+    scenic_priority: float = 0.5
 
 @dataclass
 class RouteSegment:
