@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 import logging
 import re
+from fuzzywuzzy import process
 
 from .utils.travel_planner import TravelPlanner, TravelPreferences, RoutePreference, CITY_COORDINATES
 
@@ -83,105 +84,101 @@ class TravelAssistant:
     def process_query(self, query: str) -> TravelResponse:
         """Process a user query and return a response."""
         try:
-            # Convert query to lowercase for easier processing
-            query = query.lower()
+            # Log the query
             logger.info(f"Processing query: {query}")
             
-            # Detect intent based on keywords and patterns
-            if "cost" in query or "price" in query or "expensive" in query:
-                logger.info("Detected cost intent")
-                response = self._handle_cost_query(query)
-            elif any(word in query for word in ["review", "think", "opinion", "rating"]):
-                logger.info("Detected review intent")
-                response = self._handle_review_query(query)
-            elif any(word in query for word in ["visit", "see", "attraction", "museum", "best", "places"]):
-                logger.info("Detected attraction intent")
-                response = self._handle_attraction_query(query)
-                logger.info(f"Got response with attractions: {response.attractions}")
-                # Only set error for empty attractions if there isn't already an error
-                if not response.error and (not response.attractions or len(response.attractions) == 0):
-                    logger.error("Empty attractions list from _handle_attraction_query")
-                    response.error = "Sorry, I couldn't find any attractions."
-            elif "route" in query or ("from" in query and "to" in query) or "how" in query:
+            # Convert query to lowercase for matching
+            query_lower = query.lower()
+            
+            # Detect intent
+            if any(word in query_lower for word in ["route", "path", "way", "directions"]):
                 logger.info("Detected route intent")
-                response = self._handle_route_query(query, {})
+                return self._handle_route_query(query, {})
+                
+            elif any(word in query_lower for word in ["cost", "price", "expensive", "cheap"]):
+                logger.info("Detected cost intent")
+                return self._handle_cost_query(query, {})
+                
+            elif any(word in query_lower for word in ["review", "rating", "recommend", "good", "bad"]):
+                logger.info("Detected review intent")
+                return self._handle_review_query(query, {})
+                
+            elif any(pattern in query_lower for pattern in [
+                "what can i visit", "what's in", "what is in", "places to visit",
+                "things to do", "tourist spots", "attractions", "places of interest",
+                "sightseeing", "what to see", "show me", "tell me about"
+            ]):
+                logger.info("Detected attraction intent")
+                return self._handle_attraction_query(query)
+                
             else:
                 logger.info("Unknown intent")
-                response = TravelResponse(
+                return TravelResponse(
                     intent="unknown",
                     error="I don't understand what you're asking for. Try asking about routes, attractions, costs, or reviews."
                 )
                 
-            # Add text response if not present
-            if not response.text and not response.error:
-                logger.info("Generating text response")
-                response.text = self._generate_text_response(response)
-                
-            logger.info(f"Final response: {response}")
-            return response
-                
         except Exception as e:
-            logger.error(f"Error processing query: {str(e)}", exc_info=True)
+            logger.error(f"Error processing query: {str(e)}")
             return TravelResponse(
                 intent="error",
                 error=str(e)
             )
             
-    def _extract_locations(self, query: str) -> Dict[str, str]:
-        """Extract location entities from query."""
-        locations = {}
-        
-        # Clean up query - remove punctuation except spaces
+    def _extract_locations(self, query: str) -> list:
+        """Extract location names from the query."""
+        # Convert query to lowercase for matching
         query_lower = query.lower()
-        query_lower = re.sub(r'[^\w\s]', '', query_lower)
-        words = query_lower.split()
         
-        logger.info(f"Processing query: {query_lower}")
-        logger.info(f"Words: {words}")
+        # Define location markers (words that often precede or follow location names)
+        location_markers = {
+            'prefix': ['in', 'at', 'to', 'from', 'near', 'around', 'visiting'],
+            'suffix': ['city', 'town', 'area', 'region']
+        }
         
-        # Find "from X to Y" pattern
-        for i, word in enumerate(words):
-            if word == "from" and i + 3 < len(words) and "to" in words[i+1:i+4]:
-                # Find the "to" position
-                to_pos = words.index("to", i+1, i+4)
-                
-                # Extract from_city (could be multiple words)
-                from_words = words[i+1:to_pos]
-                from_city = " ".join(from_words)
-                if from_city in CITY_COORDINATES:
-                    locations["from"] = from_city
-                    logger.info(f"Found 'from' city: {from_city}")
-                
-                # Extract to_city (remaining words, up to 3)
-                remaining = words[to_pos+1:]
-                for j in range(min(3, len(remaining))):
-                    to_city = " ".join(remaining[:j+1])
-                    if to_city in CITY_COORDINATES:
-                        locations["to"] = to_city
-                        logger.info(f"Found 'to' city: {to_city}")
-                        break
-                
-                if "from" in locations and "to" in locations:
-                    return locations
+        # Split query into words and remove punctuation
+        import re
+        words = re.findall(r'\b\w+\b', query_lower)
         
-        # Find locations after "in", "at", "near", or "to"
-        for i, word in enumerate(words):
-            if word in ["in", "at", "near", "to"]:
-                # Try combinations of 1-3 words
-                for j in range(1, 4):
-                    if i + j < len(words):
-                        city = " ".join(words[i+1:i+j+1])
-                        if city in CITY_COORDINATES:
-                            if word == "to" and "from" not in words[:i]:
-                                locations["to"] = city
-                            else:
-                                locations["location"] = city
-                            logger.info(f"Found city after '{word}': {city}")
-                            return locations
-        
-        logger.info(f"Extracted locations: {locations}")
-        return locations
+        # Try to find locations in the query
+        locations = []
+        i = 0
+        while i < len(words):
+            # Check if current word is a location marker
+            is_marker = (words[i] in location_markers['prefix'] or 
+                        (i > 0 and words[i] in location_markers['suffix']))
             
+            # Try multi-word combinations after a marker
+            if is_marker and i + 1 < len(words):
+                # Try combinations of 1-3 words after the marker
+                for j in range(min(3, len(words) - (i + 1)), 0, -1):
+                    potential_location = ' '.join(words[i+1:i+1+j])
+                    logger.debug(f"Trying potential location after marker: {potential_location}")
+                    
+                    # Try to normalize this potential location
+                    normalized = self._normalize_city_name(potential_location)
+                    if normalized in ['Amsterdam', 'Rotterdam', 'The Hague', 'Utrecht', 'Eindhoven', 'Groningen', 'Tilburg', 'Almere', 'Breda']:
+                        logger.debug(f"Found valid location: {normalized}")
+                        if normalized not in locations:  # Avoid duplicates
+                            locations.append(normalized)
+                        i += j  # Skip the words we just matched
+                        break
+            i += 1
+        
+        # If no locations found with markers, try direct matching
+        if not locations:
+            for i in range(len(words)):
+                for j in range(min(3, len(words) - i), 0, -1):
+                    potential_location = ' '.join(words[i:i+j])
+                    normalized = self._normalize_city_name(potential_location)
+                    if normalized in ['Amsterdam', 'Rotterdam', 'The Hague', 'Utrecht', 'Eindhoven', 'Groningen', 'Tilburg', 'Almere', 'Breda']:
+                        if normalized not in locations:  # Avoid duplicates
+                            locations.append(normalized)
+                        break
+        
+        logger.debug(f"Extracted locations from query '{query}': {locations}")
+        return locations
+
     def _handle_route_query(self, query: str, entities: Dict) -> TravelResponse:
         """Handle a route-related query."""
         try:
@@ -277,93 +274,94 @@ class TravelAssistant:
     def _handle_attraction_query(self, query: str) -> TravelResponse:
         """Handle an attraction search query."""
         try:
-            # Extract location from query
+            # Extract locations from query
             locations = self._extract_locations(query)
-            logger.info(f"Extracted locations: {locations}")
+            logger.debug(f"Extracted locations: {locations}")
             
             # If no location found, default to Amsterdam
             if not locations:
-                locations = {"location": "amsterdam"}
-                logger.info("No location found, defaulting to Amsterdam")
-            elif "to" in locations:
-                # If we found a "to" location but no explicit location, use it as the location
-                locations["location"] = locations["to"]
-                del locations["to"]
+                location = "Amsterdam"
+                logger.debug("No location found, defaulting to Amsterdam")
+            else:
+                location = locations[0]  # Use first location found
+                logger.debug(f"Using location: {location}")
             
             # Extract interests from query
             interests = []
-            if "museum" in query.lower() or "museums" in query.lower():
+            if "museum" in query.lower():
                 interests.append("museum")
-            elif "park" in query.lower() or "parks" in query.lower():
+            elif "park" in query.lower():
                 interests.append("park")
-            elif "restaurant" in query.lower() or "restaurants" in query.lower():
+            elif "restaurant" in query.lower():
                 interests.append("restaurant")
+            elif "shopping" in query.lower():
+                interests.append("shopping")
             else:
-                interests.append("attraction")  # Default interest
-            logger.info(f"Extracted interests: {interests}")
-                
-            # Get attractions
-            logger.info("Getting attractions from planner...")
+                interests.append("tourist_spot")
+            
+            logger.debug(f"Extracted interests: {interests}")
+            
             try:
-                # Pass interests as keywords to get better recommendations
-                attractions = self.planner.get_attractions(
-                    locations["location"], 
-                    interests
-                )
-                logger.info(f"Got {len(attractions)} attractions from planner")
+                # Get attractions from planner
+                attractions = self.planner.get_attractions(location, interests)
+                logger.debug(f"Got {len(attractions)} attractions from planner")
                 
-                # Format attractions to include required fields
+                if not attractions:
+                    # If no attractions found, return default attraction
+                    logger.debug("No attractions found, using default")
+                    attractions = [{
+                        "name": "Popular Attraction",
+                        "type": interests[0],
+                        "rating": 4.0,
+                        "location": location
+                    }]
+                
+                # Format attractions for response
                 formatted_attractions = []
                 for attraction in attractions:
                     formatted = {
                         "name": attraction.get("name", "Unknown Attraction"),
-                        "type": attraction.get("type", interests[0]),  # Use type field from recommender
-                        "rating": float(attraction.get("score", 4.0)),  # Use score as rating
-                        "location": locations["location"]
+                        "type": attraction.get("type", interests[0]),
+                        "rating": float(attraction.get("rating", 4.0)),
+                        "location": location  # Use the normalized location from query
                     }
                     formatted_attractions.append(formatted)
-                logger.info(f"Formatted {len(formatted_attractions)} attractions")
+                
+                logger.debug(f"Formatted attractions: {formatted_attractions}")
                 
                 return TravelResponse(
                     intent="find_attraction",
-                    entities=locations,
+                    entities={"location": location},
                     attractions=formatted_attractions
                 )
                 
             except Exception as e:
                 logger.error(f"Error getting attractions: {str(e)}")
-                # Return a response with the default attraction for the location
+                # Return a response with the default attraction
                 return TravelResponse(
                     intent="find_attraction",
-                    entities=locations,
+                    entities={"location": location},
                     attractions=[{
                         "name": "Popular Attraction",
                         "type": interests[0],
                         "rating": 4.0,
-                        "location": locations["location"]
+                        "location": location
                     }]
                 )
                 
         except Exception as e:
             logger.error(f"Error handling attraction query: {str(e)}")
-            # Return a response with the default attraction for the location
             return TravelResponse(
                 intent="find_attraction",
-                entities={"location": "amsterdam"},
-                attractions=[{
-                    "name": "Popular Attraction",
-                    "type": "attraction",
-                    "rating": 4.0,
-                    "location": "amsterdam"
-                }]
+                error=str(e)
             )
-            
+
     def _handle_cost_query(self, query: str) -> TravelResponse:
         """Handle a cost query."""
         try:
             locations = self._extract_locations(query)
             
-            if "from" not in locations or "to" not in locations:
+            if len(locations) < 2:
                 return TravelResponse(
                     intent="get_cost",
                     error="Please specify both start and end locations (e.g., 'cost from Amsterdam to Rotterdam')"
@@ -378,16 +376,16 @@ class TravelAssistant:
             }
             
             route = self.planner.plan_route(
-                [locations["from"], locations["to"]],
+                [locations[0], locations[1]],
                 TravelPreferences(route_preference=RoutePreference.COST)
             )
             
             return TravelResponse(
                 intent="get_cost",
-                entities=locations,
+                entities={"from": locations[0], "to": locations[1]},
                 route=route,
                 cost=cost,
-                text=f"The cost from {locations['from']} to {locations['to']} is €{cost['amount']:.2f}"
+                text=f"The cost from {locations[0]} to {locations[1]} is €{cost['amount']:.2f}"
             )
             
         except ValueError as e:
@@ -479,6 +477,46 @@ class TravelAssistant:
             return f"Here's what people think about {response.entities['attraction']}"
         else:
             return "I'm not sure how to respond to that."
+
+    def _normalize_city_name(self, city: str) -> str:
+        """Normalize city name to match known city names."""
+        from fuzzywuzzy import process
+        
+        if not hasattr(self, '_city_mapping'):
+            # Create a mapping of lowercase city names to their proper case
+            self._city_mapping = {
+                'amsterdam': 'Amsterdam',
+                'rotterdam': 'Rotterdam',
+                'the hague': 'The Hague',
+                'den haag': 'The Hague',
+                'de haag': 'The Hague',
+                'haag': 'The Hague',
+                'hague': 'The Hague',
+                'utrecht': 'Utrecht',
+                'eindhoven': 'Eindhoven',
+                'groningen': 'Groningen',
+                'tilburg': 'Tilburg',
+                'almere': 'Almere',
+                'breda': 'Breda'
+            }
+        
+        city_lower = city.lower().strip()
+        
+        # Direct lookup first
+        if city_lower in self._city_mapping:
+            logger.debug(f"Direct match found for '{city}' -> '{self._city_mapping[city_lower]}'")
+            return self._city_mapping[city_lower]
+        
+        # Try fuzzy matching if direct lookup fails
+        match, score = process.extractOne(city_lower, self._city_mapping.keys())
+        logger.debug(f"Fuzzy match for '{city}': '{match}' with score {score}")
+        
+        if score >= 85:
+            return self._city_mapping[match]
+        
+        # If no match found, return original with first letter of each word capitalized
+        logger.debug(f"No match found for '{city}', returning capitalized version")
+        return ' '.join(word.capitalize() for word in city.split())
 
 def generate_response(message, preferences, user_id):
     """
