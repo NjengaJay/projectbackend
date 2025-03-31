@@ -1,0 +1,220 @@
+"""Travel Planner module for handling route planning and POI recommendations."""
+import logging
+import os
+import pandas as pd
+from pathlib import Path
+from enum import Enum
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+from backend.recommender.hybrid_recommender import HybridRecommender
+
+logger = logging.getLogger(__name__)
+
+# City coordinates mapping
+CITY_COORDINATES = {
+    'amsterdam': (52.3676, 4.9041),
+    'rotterdam': (51.9225, 4.4792),
+    'the hague': (52.0705, 4.3007),
+    'utrecht': (52.0907, 5.1214),
+    'eindhoven': (51.4416, 5.4697),
+    'groningen': (53.2194, 6.5665),
+    'tilburg': (51.5719, 5.0672),
+    'almere': (52.3508, 5.2647),
+    'breda': (51.5719, 4.7683),
+    'nijmegen': (51.8426, 5.8546),
+    'enschede': (52.2215, 6.8937),
+    'apeldoorn': (52.2112, 5.9699),
+    'haarlem': (52.3874, 4.6462),
+    'arnhem': (51.9851, 5.8987),
+    'zaanstad': (52.4537, 4.8137),
+    'amersfoort': (52.1561, 5.3878),
+    'haarlemmermeer': (52.3080, 4.6897),
+    'den bosch': (51.6978, 5.3037),
+    'zwolle': (52.5168, 6.0830),
+    'zoetermeer': (52.0574, 4.4944),
+    'leiden': (52.1601, 4.4970),
+    'maastricht': (50.8514, 5.6910),
+    'dordrecht': (51.8133, 4.6697),
+    'ede': (52.0402, 5.6659),
+    'alphen aan den rijn': (52.1343, 4.6640),
+    'westland': (51.9930, 4.2831),
+    'alkmaar': (52.6324, 4.7534),
+    'emmen': (52.7792, 6.9061),
+    'delft': (52.0116, 4.3571),
+    'venlo': (51.3704, 6.1720),
+    'deventer': (52.2660, 6.1552),
+    'sittard-geleen': (51.0017, 5.8716),
+    'helmond': (51.4793, 5.6570),
+    'oss': (51.7654, 5.5196),
+    'amstelveen': (52.3114, 4.8725)
+}
+
+class RoutePreference(str, Enum):
+    TIME = "time"
+    COST = "cost"
+    SCENIC = "scenic"
+
+@dataclass
+class TravelPreferences:
+    route_preference: RoutePreference = RoutePreference.TIME
+    accessibility_required: bool = False
+    scenic_priority: float = 0.5
+
+class DummyPlanner:
+    """Lightweight planner implementation without graph dependencies."""
+    def plan_route(self, *args, **kwargs):
+        return {
+            "status": "info", 
+            "message": "Using simplified route planner. Full routing capabilities coming soon.",
+            "estimated_time": "2 hours",  # Dummy estimate
+            "route": [
+                {"type": "train", "from": args[0], "to": args[1], "duration": "2 hours"}
+            ]
+        }
+        
+    def get_attractions(self, location, interests):
+        attractions = []
+        if "museum" in interests:
+            attractions.append({
+                "name": "Sample Museum",
+                "type": "museum",
+                "rating": 4.5,
+                "location": location,
+                "description": "A fascinating museum in " + location
+            })
+        if "park" in interests:
+            attractions.append({
+                "name": "City Park",
+                "type": "park",
+                "rating": 4.3,
+                "location": location,
+                "description": "Beautiful park in " + location
+            })
+        if "restaurant" in interests:
+            attractions.append({
+                "name": "Local Restaurant",
+                "type": "restaurant",
+                "rating": 4.4,
+                "location": location,
+                "description": "Popular local cuisine in " + location
+            })
+        if not attractions:  # Default attraction if no matching interests
+            attractions.append({
+                "name": "Popular Attraction",
+                "type": "attraction",
+                "rating": 4.0,
+                "location": location,
+                "description": "Must-visit attraction in " + location
+            })
+        return attractions
+                
+    def _get_city_coordinates(self, city):
+        return CITY_COORDINATES.get(city.lower())
+
+class TravelPlanner:
+    """Travel planner class for handling route planning and POI recommendations."""
+
+    def __init__(self):
+        """Initialize the travel planner with basic components."""
+        try:
+            logger.info("Initializing components...")
+            
+            # Initialize recommender
+            self.recommender = HybridRecommender(n_clusters=8)
+            
+            # Check for cached models
+            model_cache = Path(__file__).resolve().parent.parent.parent.parent / "model_cache"
+            model_cache.mkdir(exist_ok=True)
+            
+            # Try optimized model first, fall back to original
+            optimized_model = model_cache / "recommender_models_optimized.joblib"
+            original_model = model_cache / "recommender_models.joblib"
+            
+            model_loaded = False
+            
+            if optimized_model.exists():
+                logger.info("Loading optimized model...")
+                if self.recommender.load_models(str(optimized_model)):
+                    logger.info("Successfully loaded optimized model")
+                    model_loaded = True
+                    
+            if not model_loaded and original_model.exists():
+                logger.info("Loading original model...")
+                if self.recommender.load_models(str(original_model)):
+                    logger.info("Successfully loaded original model")
+                    model_loaded = True
+            
+            if not model_loaded:
+                logger.warning("Could not load recommender models, using basic planner")
+                
+            # Initialize the dummy planner
+            self.planner = DummyPlanner()
+                
+        except Exception as e:
+            logger.error(f"Error initializing components: {str(e)}", exc_info=True)
+            logger.error(f"Current working directory: {os.getcwd()}")
+            self.planner = DummyPlanner()
+
+    def _get_city_coordinates(self, city: str) -> Optional[Tuple[float, float]]:
+        """Get coordinates for a city name."""
+        return self.planner._get_city_coordinates(city)
+        
+    def plan_route(self, start_city: str, end_city: str, preferences: Optional[TravelPreferences] = None) -> Dict:
+        """Plan a route between two cities with given preferences."""
+        try:
+            if not preferences:
+                preferences = TravelPreferences()
+                
+            return self.planner.plan_route(start_city, end_city, preferences)
+            
+        except Exception as e:
+            logger.error(f"Error finding route: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error finding route: {str(e)}"
+            }
+        
+    def get_attractions(self, location: str, interests: List[str], preferences: Optional[TravelPreferences] = None) -> List[Dict]:
+        """Get attractions for a location based on interests and preferences."""
+        try:
+            logger.info(f"Getting attractions for location: {location}, interests: {interests}")
+            
+            # Get coordinates for the location
+            coords = self._get_city_coordinates(location)
+            if not coords:
+                logger.warning(f"Could not find coordinates for location: {location}")
+                return []
+                
+            # Try to use recommender first
+            try:
+                # Create user preferences dict
+                user_prefs = {
+                    'interests': interests,
+                    'location': location
+                }
+                
+                # Add accessibility preferences if provided
+                if preferences and preferences.accessibility_required:
+                    user_prefs['accessibility_required'] = True
+                
+                # Try to get recommendations from the recommender system
+                recommendations = self.recommender.get_recommendations(
+                    location=location,
+                    user_preferences=user_prefs,
+                    current_location=coords
+                )
+                
+                if recommendations:
+                    logger.info(f"Got {len(recommendations)} recommendations from recommender")
+                    return recommendations
+                    
+            except Exception as recommender_error:
+                logger.warning(f"Recommender failed, falling back to basic attractions: {recommender_error}")
+            
+            # Fall back to basic attractions if recommender fails
+            return self.planner.get_attractions(location, interests)
+            
+        except Exception as e:
+            logger.error(f"Error getting attractions: {str(e)}", exc_info=True)
+            return []
