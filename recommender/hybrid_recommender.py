@@ -5,7 +5,7 @@ for tourist attraction recommendations.
 
 import pandas as pd
 import numpy as np
-from sklearn.cluster import KMeans
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -26,6 +26,11 @@ class HybridRecommender:
             n_clusters: Number of clusters for K-Means (default: 8)
         """
         self.n_clusters = n_clusters
+        self.kmeans = MiniBatchKMeans(n_clusters=n_clusters, n_init=3, batch_size=1000, random_state=42)
+        self.feature_scaler = StandardScaler()
+        self.location_scaler = MinMaxScaler()
+        self.tfidf = TfidfVectorizer(stop_words='english')
+        self.nn_model = NearestNeighbors(n_neighbors=10, metric='cosine')
         
         # Store processed data
         self.pois_df = None
@@ -38,12 +43,8 @@ class HybridRecommender:
         self.mobility_columns = None
         self.feature_dimensions = None
         
-        # Initialize models with explicit parameters
-        self.kmeans = KMeans(
-            n_clusters=self.n_clusters,
-            random_state=42,
-            n_init=10  # Explicitly set to avoid warning
-        )
+        # Initialize models
+        self.kmeans = MiniBatchKMeans(n_clusters=self.n_clusters, n_init=3, batch_size=1000, random_state=42)
         self.feature_scaler = StandardScaler()
         self.location_scaler = MinMaxScaler()
         self.tfidf = TfidfVectorizer(stop_words='english')
@@ -75,6 +76,7 @@ class HybridRecommender:
             self.feature_matrix = models.get("feature_matrix")
             self.tfidf_matrix = models.get("tfidf_matrix")
             self.cluster_labels = models.get("cluster_labels")
+            self.pois_df = models.get("pois_df")
             
         except Exception as e:
             logger.warning(f"Could not load models: {str(e)}")
@@ -91,104 +93,55 @@ class HybridRecommender:
         """
         logger.info("Loading and preprocessing POIs data...")
         
-        try:
-            # Load data
-            logger.info(f"Attempting to load data from: {data_path}")
-            logger.info(f"File exists: {os.path.exists(data_path)}")
-            logger.info(f"Absolute path: {os.path.abspath(data_path)}")
-            
-            df = pd.read_csv(data_path)
-            logger.info(f"Successfully loaded dataset with {len(df)} rows and {len(df.columns)} columns")
-            logger.info(f"Available columns: {sorted(df.columns.tolist())}")
-            
-            # Handle missing values for core features
-            core_features = ['opening_hours', 'wheelchair', 'tourism']
-            for feature in core_features:
-                if feature in df.columns:
-                    df[feature] = df[feature].fillna('unknown')
-                    logger.info(f"Found column {feature} with {df[feature].nunique()} unique values")
-                else:
-                    df[feature] = 'unknown'
-                    logger.warning(f"Column {feature} not found in dataset, using default value")
-            
-            # Create feature text for TF-IDF
-            df['feature_text'] = df.apply(lambda row: ' '.join(
-                str(row[col]) for col in ['tourism', 'name', 'city']
-                if col in df.columns and pd.notna(row.get(col, None))
-            ), axis=1)
-            
-            logger.info(f"Sample feature text: {df['feature_text'].iloc[0]}")
-            
-            self.pois_df = df
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error preprocessing data: {str(e)}", exc_info=True)
-            raise
+        # Load data
+        df = pd.read_csv(data_path)
+        logger.info(f"Loaded dataset with {len(df)} rows and {len(df.columns)} columns")
+        logger.info(f"Available columns: {sorted(df.columns.tolist())}")
+        
+        # Handle missing values for core features
+        core_features = ['opening_hours', 'wheelchair', 'tourism']
+        for feature in core_features:
+            if feature in df.columns:
+                df[feature] = df[feature].fillna('unknown')
+                logger.info(f"Found column {feature} with {df[feature].nunique()} unique values")
+            else:
+                df[feature] = 'unknown'
+                logger.warning(f"Column {feature} not found in dataset, using default value")
+        
+        # Create feature text for TF-IDF
+        df['feature_text'] = df.apply(lambda row: ' '.join(
+            str(row[col]) for col in ['tourism', 'name', 'city']
+            if col in df.columns and pd.notna(row.get(col, None))
+        ), axis=1)
+        
+        logger.info(f"Sample feature text: {df['feature_text'].iloc[0]}")
+        
+        self.pois_df = df
+        return df
         
     def extract_features(self, df: pd.DataFrame) -> np.ndarray:
-        """
-        Extract and scale features for clustering.
-        
-        Args:
-            df: Preprocessed DataFrame
-            
-        Returns:
-            Scaled feature matrix
-        """
+        """Extract and scale features."""
         logger.info("Extracting and scaling features...")
-        features_list = []
-        feature_dimensions = []
         
-        # Scale location features if available
-        if 'latitude' in df.columns and 'longitude' in df.columns:
-            location_features = self.location_scaler.fit_transform(
-                df[['latitude', 'longitude']]
-            )
-            features_list.append(location_features)
-            feature_dimensions.append(('location', location_features.shape[1]))
+        # Store the original DataFrame
+        self.pois_df = df.copy()
         
-        # Create dummy variables for available categorical features
-        categorical_cols = [col for col in ['tourism', 'wheelchair', 'opening_hours'] 
-                          if col in df.columns]
-        if categorical_cols:
-            categorical_features = pd.get_dummies(
-                df[categorical_cols],
-                prefix=categorical_cols
-            )
-            self.categorical_columns = categorical_features.columns.tolist()
-            features_list.append(categorical_features.values)
-            feature_dimensions.append(('categorical', categorical_features.shape[1]))
+        # Create feature text for TF-IDF using only available columns
+        text_columns = ['tourism', 'name']  # Only use guaranteed columns
+        df['feature_text'] = df.apply(lambda row: ' '.join(
+            str(row[col]) for col in text_columns
+            if pd.notna(row.get(col, None))
+        ), axis=1)
+        logger.info("Created feature text")
         
-        # Add mobility features if available
-        mobility_features = []
-        for col in df.columns:
-            if any(term in col.lower() for term in ['distance', 'duration', 'trips']):
-                mobility_features.append(col)
+        # Fit and transform TF-IDF
+        self.tfidf_matrix = self.tfidf.fit_transform(df['feature_text'])
+        logger.info(f"TF-IDF matrix shape: {self.tfidf_matrix.shape}")
         
-        if mobility_features:
-            logger.info(f"Using mobility features: {mobility_features}")
-            self.mobility_columns = mobility_features
-            mobility_data = df[mobility_features].fillna(0)
-            mobility_scaled = StandardScaler().fit_transform(mobility_data)
-            features_list.append(mobility_scaled)
-            feature_dimensions.append(('mobility', mobility_scaled.shape[1]))
+        # Use TF-IDF matrix as the feature matrix for clustering
+        self.feature_matrix = self.tfidf_matrix.toarray()
+        logger.info(f"Final feature matrix shape: {self.feature_matrix.shape}")
         
-        # Combine all available features
-        if not features_list:
-            raise ValueError("No valid features found in the dataset")
-        
-        feature_matrix = np.hstack(features_list)
-        self.feature_dimensions = feature_dimensions
-        
-        # Log feature dimensions
-        logger.info("Feature matrix dimensions:")
-        for name, dim in feature_dimensions:
-            logger.info(f"- {name}: {dim} features")
-        logger.info(f"Total features: {feature_matrix.shape[1]}")
-        
-        # Scale the combined features
-        self.feature_matrix = self.feature_scaler.fit_transform(feature_matrix)
         return self.feature_matrix
         
     def train_clustering(self) -> None:
@@ -219,76 +172,100 @@ class HybridRecommender:
         logger.info(f"TF-IDF vocabulary size: {len(self.tfidf.vocabulary_)}")
         
     def fit(self, data_path: str) -> None:
-        """Fit all models in one go."""
-        logger.info("Starting model training...")
+        """Train the recommender system on POIs data."""
+        try:
+            logger.info(f"Loading data from {data_path}")
+            df = pd.read_csv(data_path)
+            logger.info(f"Loaded {len(df)} POIs")
+            
+            # Add city column if not present
+            if 'city' not in df.columns:
+                logger.info("Adding city column with default value 'amsterdam'")
+                df['city'] = 'amsterdam'  # Default to Amsterdam for now
+            
+            # Store the original DataFrame
+            self.pois_df = df.copy()
+            logger.info(f"Columns in DataFrame: {df.columns.tolist()}")
+            
+            # Extract features
+            logger.info("Extracting features...")
+            self.feature_matrix = self.extract_features(df)
+            
+            # Train clustering
+            logger.info("Training clustering model...")
+            self.cluster_labels = self.kmeans.fit_predict(self.feature_matrix)
+            logger.info(f"Trained clustering model with {self.n_clusters} clusters")
+            
+            # Log cluster sizes
+            for i in range(self.n_clusters):
+                cluster_size = sum(self.cluster_labels == i)
+                logger.info(f"Cluster {i}: {cluster_size} POIs")
+                
+        except Exception as e:
+            logger.error(f"Error in fit: {str(e)}", exc_info=True)
+            raise
         
-        # Load and preprocess data
-        df = self.preprocess_data(data_path)
-        logger.info(f"Preprocessed {len(df)} POIs")
-        
-        # Extract and scale features
-        features = self.extract_features(df)
-        logger.info(f"Extracted {features.shape[1]} features")
-        
-        # Train models
-        self.train_clustering()
-        self.train_content_based()
-        
-        logger.info("Model training complete")
-        
+    def get_pois_for_location(self, location: str) -> pd.DataFrame:
+        """Get POIs for a specific location."""
+        try:
+            if self.pois_df is None:
+                logger.error("POIs DataFrame is None")
+                return pd.DataFrame()
+                
+            # Case-insensitive location matching
+            location = location.lower()
+            logger.info(f"Looking for POIs in location: {location}")
+            logger.info(f"Available cities: {self.pois_df['city'].unique().tolist()}")
+            
+            # Try exact match first
+            location_mask = self.pois_df['city'].str.lower() == location
+            pois = self.pois_df[location_mask].copy()
+            
+            # If no exact match, try substring match
+            if len(pois) == 0:
+                logger.info("No exact match found, trying substring match")
+                location_mask = self.pois_df['city'].str.lower().str.contains(location)
+                pois = self.pois_df[location_mask].copy()
+            
+            logger.info(f"Location search results:")
+            logger.info(f"- Total POIs: {len(self.pois_df)}")
+            logger.info(f"- Location: {location}")
+            logger.info(f"- Matching POIs: {len(pois)}")
+            
+            # Log some sample POIs if available
+            if len(pois) > 0:
+                logger.info("Sample POIs:")
+                for _, poi in pois.head(3).iterrows():
+                    logger.info(f"- {poi['name']} ({poi['tourism']})")
+            
+            return pois
+            
+        except Exception as e:
+            logger.error(f"Error getting POIs for location: {str(e)}", exc_info=True)
+            return pd.DataFrame()
+            
     def get_recommendations(
-        self, 
+        self,
+        location: str,
         user_preferences: Dict,
-        current_location: Tuple[float, float],
+        current_location: Optional[Tuple[float, float]] = None,
         n_recommendations: int = 10
     ) -> List[Dict]:
-        """
-        Get POI recommendations based on user preferences and location.
-        
-        Args:
-            user_preferences: Dictionary containing user preferences
-            current_location: Tuple of (latitude, longitude)
-            n_recommendations: Number of recommendations to return
-            
-        Returns:
-            List of recommended POIs
-        """
-        logger.info("Getting recommendations...")
-        logger.info(f"User preferences: {user_preferences}")
-        logger.info(f"Current location: {current_location}")
-        
-        if self.pois_df is None or self.feature_matrix is None:
-            raise ValueError("Models not trained. Call fit() first.")
-        
+        """Get recommendations for a location."""
         try:
-            # Get relevant cluster
-            target_cluster = self._get_location_based_cluster(current_location)
-            logger.info(f"Selected cluster: {target_cluster}")
+            logger.info(f"Getting recommendations for {location} with preferences {user_preferences}")
             
-            # Filter POIs by cluster
-            cluster_pois = self.pois_df[
-                self.pois_df['cluster'] == target_cluster
-            ].copy()
+            # Get POIs for the location
+            pois = self.get_pois_for_location(location)
+            logger.info(f"Found {len(pois)} POIs for location {location}")
             
-            logger.info(f"Found {len(cluster_pois)} POIs in cluster")
-            
-            # Apply mobility filtering if preferences provided
-            if 'mobility' in user_preferences:
-                filtered_pois = self._apply_mobility_filter(
-                    user_preferences['mobility']
-                )
-                cluster_pois = cluster_pois[
-                    cluster_pois.index.isin(filtered_pois.index)
-                ]
-                logger.info(f"After mobility filtering: {len(cluster_pois)} POIs")
-            
-            if len(cluster_pois) == 0:
-                logger.warning("No POIs found after filtering")
+            if len(pois) == 0:
+                logger.warning(f"No POIs found for location: {location}")
                 return []
             
             # Get content-based recommendations
             recommendations = self._get_content_based_recommendations(
-                cluster_pois,
+                pois,
                 user_preferences,
                 current_location,
                 n_recommendations
@@ -298,9 +275,9 @@ class HybridRecommender:
             return recommendations
             
         except Exception as e:
-            logger.error(f"Error generating recommendations: {str(e)}")
-            raise
-        
+            logger.error(f"Error getting recommendations: {str(e)}", exc_info=True)
+            return []
+            
     def _apply_mobility_filter(self, mobility_prefs: Dict) -> pd.DataFrame:
         """Apply mobility-based filtering to POIs."""
         filtered_df = self.pois_df.copy()
@@ -377,54 +354,69 @@ class HybridRecommender:
         self,
         pois_df: pd.DataFrame,
         user_preferences: Dict,
-        current_location: Optional[Tuple[float, float]],
-        n_recommendations: int = 10
+        current_location: Tuple[float, float],
+        n_recommendations: int
     ) -> List[Dict]:
-        """Get content-based recommendations from a set of POIs."""
-        if len(pois_df) == 0:
-            logger.warning("No POIs available for content-based filtering")
+        """Get content-based recommendations."""
+        try:
+            logger.info("Getting content-based recommendations...")
+            logger.info(f"Input POIs shape: {pois_df.shape}")
+            
+            # Create feature text for the query
+            interests = user_preferences.get('interests', [])
+            query_text = ' '.join(interests)
+            logger.info(f"Query text: {query_text}")
+            
+            # Filter POIs by tourism type if museums are requested
+            if 'museum' in interests:
+                logger.info("Filtering for museums")
+                museum_mask = pois_df['tourism'].str.lower().str.contains('museum', na=False)
+                pois_df = pois_df[museum_mask]
+                logger.info(f"Found {len(pois_df)} museums")
+            
+            if len(pois_df) == 0:
+                logger.warning("No matching POIs found after filtering")
+                return []
+            
+            # Transform query using TF-IDF
+            query_vector = self.tfidf.transform([query_text])
+            logger.info(f"Query vector shape: {query_vector.shape}")
+            
+            # Get TF-IDF vectors for the filtered POIs
+            poi_indices = pois_df.index
+            poi_vectors = self.tfidf_matrix[poi_indices]
+            logger.info(f"POI vectors shape: {poi_vectors.shape}")
+            
+            # Calculate similarities
+            similarities = cosine_similarity(query_vector, poi_vectors)
+            logger.info(f"Similarities shape: {similarities.shape}")
+            
+            # Get top N indices
+            top_n = min(n_recommendations, len(pois_df))
+            top_indices = similarities[0].argsort()[-top_n:][::-1]
+            logger.info(f"Found {len(top_indices)} matches")
+            
+            # Get recommendations
+            recommendations = []
+            for idx in top_indices:
+                poi = pois_df.iloc[idx]
+                recommendation = {
+                    'name': poi['name'],
+                    'type': poi['tourism'],
+                    'rating': 4.0,  # Default rating
+                    'location': {
+                        'latitude': float(poi['latitude']),
+                        'longitude': float(poi['longitude'])
+                    }
+                }
+                recommendations.append(recommendation)
+            
+            logger.info(f"Returning {len(recommendations)} recommendations")
+            return recommendations
+            
+        except Exception as e:
+            logger.error(f"Error in content-based recommendations: {str(e)}", exc_info=True)
             return []
-            
-        # Get content similarity scores
-        if 'keywords' in user_preferences:
-            content_scores = self._get_content_similarity(
-                user_preferences['keywords'],
-                pois_df
-            )
-        else:
-            content_scores = np.ones(len(pois_df))
-            
-        # Get location similarity scores
-        if current_location:
-            location_scores = self._get_location_similarity(
-                current_location,
-                pois_df
-            )
-        else:
-            location_scores = np.ones(len(pois_df))
-            
-        # Combine scores
-        final_scores = 0.6 * content_scores + 0.4 * location_scores
-        
-        # Sort POIs by score
-        pois_df = pois_df.copy()
-        pois_df['score'] = final_scores
-        recommendations = pois_df.nlargest(n_recommendations, 'score')
-        
-        # Format recommendations
-        return [
-            {
-                'id': poi.name,
-                'name': poi['name'],
-                'type': poi['tourism'],
-                'location': {
-                    'latitude': poi['latitude'],
-                    'longitude': poi['longitude']
-                },
-                'score': poi['score']
-            }
-            for _, poi in recommendations.iterrows()
-        ]
         
     def _get_content_similarity(
         self,
@@ -556,19 +548,52 @@ class HybridRecommender:
             'nn_model': self.nn_model,
             'feature_matrix': self.feature_matrix,
             'tfidf_matrix': self.tfidf_matrix,
-            'cluster_labels': self.cluster_labels
+            'cluster_labels': self.cluster_labels,
+            'pois_df': self.pois_df
         }, path)
+        
+        logger.info("Models saved successfully")
         
     def load_models(self, path: str) -> None:
         """Load trained models and scalers."""
-        logger.info(f"Loading models from {path}...")
-        
-        models = joblib.load(path)
-        self.kmeans = models['kmeans']
-        self.feature_scaler = models['feature_scaler']
-        self.location_scaler = models['location_scaler']
-        self.tfidf = models['tfidf']
-        self.nn_model = models['nn_model']
-        self.feature_matrix = models['feature_matrix']
-        self.tfidf_matrix = models['tfidf_matrix']
-        self.cluster_labels = models['cluster_labels']
+        try:
+            logger.info(f"Loading models from {path}")
+            models = joblib.load(path)
+            logger.info("Successfully loaded models from disk")
+            
+            # Load each component
+            self.kmeans = models.get("kmeans")
+            logger.info(f"Loaded kmeans model: {type(self.kmeans)}")
+            
+            self.feature_scaler = models.get("feature_scaler")
+            logger.info(f"Loaded feature_scaler: {type(self.feature_scaler)}")
+            
+            self.location_scaler = models.get("location_scaler")
+            logger.info(f"Loaded location_scaler: {type(self.location_scaler)}")
+            
+            self.tfidf = models.get("tfidf")
+            logger.info(f"Loaded tfidf: {type(self.tfidf)}")
+            
+            self.nn_model = models.get("nn_model")
+            logger.info(f"Loaded nn_model: {type(self.nn_model)}")
+            
+            self.feature_matrix = models.get("feature_matrix")
+            logger.info(f"Loaded feature_matrix shape: {self.feature_matrix.shape if self.feature_matrix is not None else None}")
+            
+            self.tfidf_matrix = models.get("tfidf_matrix")
+            logger.info(f"Loaded tfidf_matrix shape: {self.tfidf_matrix.shape if self.tfidf_matrix is not None else None}")
+            
+            self.cluster_labels = models.get("cluster_labels")
+            logger.info(f"Loaded cluster_labels shape: {self.cluster_labels.shape if self.cluster_labels is not None else None}")
+            
+            self.pois_df = models.get("pois_df")
+            logger.info(f"Loaded pois_df shape: {self.pois_df.shape if self.pois_df is not None else None}")
+            
+            # Fit location scaler on POIs data if available
+            if self.pois_df is not None and 'latitude' in self.pois_df.columns and 'longitude' in self.pois_df.columns:
+                logger.info("Fitting location scaler on POIs data")
+                self.location_scaler.fit(self.pois_df[['latitude', 'longitude']])
+            
+        except Exception as e:
+            logger.error(f"Could not load models: {str(e)}", exc_info=True)
+            raise
