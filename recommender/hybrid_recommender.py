@@ -374,6 +374,13 @@ class HybridRecommender:
                 pois_df = pois_df[museum_mask]
                 logger.info(f"Found {len(pois_df)} museums")
             
+            # Apply accessibility filter if required
+            if user_preferences.get('accessibility_required'):
+                logger.info("Filtering for wheelchair accessibility")
+                wheelchair_mask = pois_df['wheelchair'].str.lower() == 'yes'
+                pois_df = pois_df[wheelchair_mask]
+                logger.info(f"Found {len(pois_df)} wheelchair accessible POIs")
+            
             if len(pois_df) == 0:
                 logger.warning("No matching POIs found after filtering")
                 return []
@@ -407,7 +414,8 @@ class HybridRecommender:
                     'location': {
                         'latitude': float(poi['latitude']),
                         'longitude': float(poi['longitude'])
-                    }
+                    },
+                    'wheelchair_accessible': poi['wheelchair'].lower() == 'yes'
                 }
                 recommendations.append(recommendation)
             
