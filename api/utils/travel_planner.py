@@ -114,39 +114,19 @@ class DummyPlanner:
 
 class TravelPlanner:
     """Travel planner class for handling route planning and POI recommendations."""
-
-    def __init__(self):
+    
+    def __init__(self, recommender=None):
         """Initialize the travel planner with basic components."""
         try:
             logger.info("Initializing components...")
             
-            # Initialize recommender
-            self.recommender = HybridRecommender(n_clusters=8)
-            
-            # Check for cached models
-            model_cache = Path(__file__).resolve().parent.parent.parent.parent / "model_cache"
-            model_cache.mkdir(exist_ok=True)
-            
-            # Try optimized model first, fall back to original
-            optimized_model = model_cache / "recommender_models_optimized.joblib"
-            original_model = model_cache / "recommender_models.joblib"
-            
-            model_loaded = False
-            
-            if optimized_model.exists():
-                logger.info("Loading optimized model...")
-                if self.recommender.load_models(str(optimized_model)):
-                    logger.info("Successfully loaded optimized model")
-                    model_loaded = True
-                    
-            if not model_loaded and original_model.exists():
-                logger.info("Loading original model...")
-                if self.recommender.load_models(str(original_model)):
-                    logger.info("Successfully loaded original model")
-                    model_loaded = True
-            
-            if not model_loaded:
-                logger.warning("Could not load recommender models, using basic planner")
+            # Use provided recommender or create new one
+            if recommender is not None:
+                self.recommender = recommender
+                logger.info("Using provided recommender instance")
+            else:
+                logger.warning("No recommender provided, using basic planner only")
+                self.recommender = None
                 
             # Initialize the dummy planner
             self.planner = DummyPlanner()
@@ -155,6 +135,7 @@ class TravelPlanner:
             logger.error(f"Error initializing components: {str(e)}", exc_info=True)
             logger.error(f"Current working directory: {os.getcwd()}")
             self.planner = DummyPlanner()
+            self.recommender = None
 
     def _get_city_coordinates(self, city: str) -> Optional[Tuple[float, float]]:
         """Get coordinates for a city name."""
