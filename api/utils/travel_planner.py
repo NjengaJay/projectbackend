@@ -161,41 +161,59 @@ class TravelPlanner:
         try:
             logger.info(f"Getting attractions for location: {location}, interests: {interests}")
             
-            # Get coordinates for the location
-            coords = self._get_city_coordinates(location)
-            if not coords:
-                logger.warning(f"Could not find coordinates for location: {location}")
-                return []
-                
-            # Try to use recommender first
-            try:
-                # Create user preferences dict
-                user_prefs = {
-                    'interests': interests,
-                    'location': location
+            if not self.recommender:
+                logger.warning("No recommender available, using dummy planner")
+                return self.planner.get_attractions(location, interests)
+
+            # Convert interests to user preferences format
+            user_preferences = {
+                'interests': interests,
+                'mobility': {
+                    'mode': 'walking',
+                    'max_distance': 2.0
                 }
-                
-                # Add accessibility preferences if provided
-                if preferences and preferences.accessibility_required:
-                    user_prefs['accessibility_required'] = True
-                
-                # Try to get recommendations from the recommender system
-                recommendations = self.recommender.get_recommendations(
-                    location=location,
-                    user_preferences=user_prefs,
-                    current_location=coords
-                )
-                
-                if recommendations:
-                    logger.info(f"Got {len(recommendations)} recommendations from recommender")
-                    return recommendations
+            }
+            logger.info(f"Created user preferences: {user_preferences}")
+
+            # Add accessibility preferences if provided
+            if preferences and preferences.accessibility_required:
+                user_preferences['mobility']['accessibility_required'] = True
+                logger.info("Added accessibility requirements")
+
+            # Get recommendations from recommender
+            logger.info("Calling recommender.get_recommendations...")
+            recommendations = self.recommender.get_recommendations(
+                location=location.lower(),  # Convert to lowercase to match city names
+                user_preferences=user_preferences
+            )
+            logger.info(f"Got {len(recommendations)} recommendations")
+            logger.debug(f"Raw recommendations: {recommendations}")
+
+            # Format recommendations
+            formatted_attractions = []
+            for i, rec in enumerate(recommendations):
+                logger.debug(f"Processing recommendation {i}: {rec}")
+                if not rec.get('name'):
+                    logger.warning(f"Skipping recommendation {i} due to missing name")
+                    continue
                     
-            except Exception as recommender_error:
-                logger.warning(f"Recommender failed, falling back to basic attractions: {recommender_error}")
-            
-            # Fall back to basic attractions if recommender fails
-            return self.planner.get_attractions(location, interests)
-            
+                formatted = {
+                    'name': rec['name'],
+                    'type': rec.get('tourism', 'tourist_spot'),
+                    'rating': float(rec.get('score', 4.0)),
+                    'location': {
+                        'latitude': rec.get('latitude'),
+                        'longitude': rec.get('longitude')
+                    },
+                    'distance': rec.get('distance')
+                }
+                logger.debug(f"Formatted recommendation {i}: {formatted}")
+                formatted_attractions.append(formatted)
+
+            logger.info(f"Returning {len(formatted_attractions)} formatted attractions")
+            return formatted_attractions
+
         except Exception as e:
             logger.error(f"Error getting attractions: {str(e)}", exc_info=True)
-            return []
+            # Return dummy attractions on error
+            return self.planner.get_attractions(location, interests)

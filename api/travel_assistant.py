@@ -99,14 +99,18 @@ class TravelAssistant:
                 logger.info("Detected cost intent")
                 return self._handle_cost_query(query, {})
                 
-            elif any(word in query_lower for word in ["review", "rating", "recommend", "good", "bad"]):
+            elif any(word in query_lower for word in ["recommend", "recommendation", "suggest", "show", "tell me about"]):
+                logger.info("Detected attraction intent")
+                return self._handle_attraction_query(query)
+                
+            elif any(word in query_lower for word in ["review", "rating", "good", "bad"]):
                 logger.info("Detected review intent")
                 return self._handle_review_query(query, {})
                 
             elif any(pattern in query_lower for pattern in [
                 "what can i visit", "what's in", "what is in", "places to visit",
                 "things to do", "tourist spots", "attractions", "places of interest",
-                "sightseeing", "what to see", "show me", "tell me about"
+                "sightseeing", "what to see"
             ]):
                 logger.info("Detected attraction intent")
                 return self._handle_attraction_query(query)
@@ -263,10 +267,10 @@ class TravelAssistant:
         
         response = [
             f"Here's your route from {source.title()} to {destination.title()}:",
-            f"🕒 Total time: {time_str}",
-            f"💰 Cost: €{cost}",
-            f"📏 Distance: {distance}km",
-            f"🚌 Transport modes: {', '.join(summary['transport_modes'])}"
+            f"Time: {time_str}",
+            f"Cost: €{cost}",
+            f"Distance: {distance}km",
+            f"Transport modes: {', '.join(summary['transport_modes'])}"
         ]
         
         return "\n".join(response)
@@ -469,15 +473,97 @@ class TravelAssistant:
             
         if response.intent == "find_route":
             return f"Here's the route from {response.entities['from']} to {response.entities['to']}"
+            
         elif response.intent == "find_attraction":
-            return f"Here are some attractions in {response.entities['location']}"
+            # Create a more informative response for attractions
+            if not response.attractions:
+                return f"I couldn't find any attractions in {response.entities.get('location', 'that location')}"
+                
+            text_parts = [f"Here are some popular attractions in {response.entities.get('location', 'that location')}:"]
+            
+            # Group attractions by type
+            attractions_by_type = {}
+            for attraction in response.attractions:
+                type_str = attraction.get('type', 'attraction').lower()
+                if type_str not in attractions_by_type:
+                    attractions_by_type[type_str] = []
+                attractions_by_type[type_str].append(attraction)
+            
+            # Define type emoji mapping with ASCII fallbacks
+            type_emojis = {
+                'museum': '*',        # 🏛️
+                'gallery': '@',       # 🎨
+                'artwork': '@',       # 🎨
+                'attraction': '!',    # 🎯
+                'viewpoint': '^',     # 🌅
+                'theme_park': 'O',    # 🎡
+                'zoo': '&',           # 🦁
+                'aquarium': '~',      # 🐠
+                'park': '#',          # 🌳
+                'garden': '*',        # 🌸
+                'historic_site': '^', # 🏛️
+                'monument': '^',      # 🗽
+                'castle': '^',        # 🏰
+                'ruins': '^',         # 🏛️
+                'entertainment': '@',  # 🎭
+                'theater': '@',       # 🎭
+                'cinema': '@',        # 🎬
+                'arts_centre': '@',   # 🎨
+                'tourist_spot': '!'   # Default for general tourist spots
+            }
+            
+            # Sort types by priority
+            priority_types = [
+                'attraction',  # General attractions first
+                'tourist_spot',
+                'theme_park', 'entertainment',
+                'castle', 'historic_site', 'monument',
+                'viewpoint', 'park', 'garden',
+                'zoo', 'aquarium',
+                'museum', 'gallery', 'artwork', 'arts_centre'  # Cultural attractions last
+            ]
+            
+            sorted_types = sorted(
+                attractions_by_type.keys(),
+                key=lambda x: (
+                    priority_types.index(x) if x in priority_types else len(priority_types)
+                )
+            )
+            
+            # Add attractions by type
+            for type_str in sorted_types:
+                attractions = attractions_by_type[type_str]
+                symbol = type_emojis.get(type_str, '>')
+                
+                # Capitalize and format type
+                formatted_type = type_str.replace('_', ' ').title()
+                text_parts.append(f"\n{symbol} {formatted_type}:")
+                
+                for attraction in attractions:
+                    name = attraction.get('name', '')
+                    rating = attraction.get('rating', 0)
+                    distance = attraction.get('distance')
+                    
+                    # Format the attraction details
+                    details = [name]
+                    if rating > 0:
+                        details.append(f"Rating: {rating:.1f}/5")
+                    if distance:
+                        details.append(f"{distance:.1f}km away")
+                    
+                    text_parts.append(f"  - {' | '.join(details)}")
+            
+            return "\n".join(text_parts)
+            
         elif response.intent == "get_cost":
             return f"The cost from {response.entities['from']} to {response.entities['to']} is €{response.cost['amount']:.2f}"
+            
         elif response.intent == "get_review":
             return f"Here's what people think about {response.entities['attraction']}"
+            
         else:
             return "I'm not sure how to respond to that."
-
+            
     def _normalize_city_name(self, city: str) -> str:
         """Normalize city name to match known city names."""
         from fuzzywuzzy import process

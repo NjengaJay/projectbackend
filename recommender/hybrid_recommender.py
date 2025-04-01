@@ -253,17 +253,47 @@ class HybridRecommender:
                 
             # Filter POIs by location
             location = location.lower()
+            logger.info(f"Filtering POIs for location: {location}")
+            
+            # First try exact match
             location_mask = self.pois_df['city'].str.lower() == location
             pois = self.pois_df[location_mask].copy()
             
             if len(pois) == 0:
+                logger.warning(f"No exact matches for location: {location}")
+                # Try partial match
+                location_mask = self.pois_df['city'].str.lower().str.contains(location, na=False)
+                pois = self.pois_df[location_mask].copy()
+            
+            if len(pois) == 0:
                 logger.warning(f"No POIs found for location: {location}")
                 return pd.DataFrame()
-                
+            
+            # Define attraction types
+            attraction_types = {
+                'museum', 'gallery', 'artwork', 'attraction', 'viewpoint', 
+                'theme_park', 'zoo', 'aquarium', 'park', 'garden',
+                'historic_site', 'monument', 'castle', 'ruins',
+                'entertainment', 'theater', 'cinema', 'arts_centre'
+            }
+            
+            # Filter out non-attraction POIs
+            attraction_mask = pois['tourism'].str.lower().isin(attraction_types)
+            pois = pois[attraction_mask].copy()
+            
+            # Log some stats about the POIs
+            logger.info(f"Found {len(pois)} attraction POIs for {location}")
+            logger.debug(f"POI columns: {pois.columns.tolist()}")
+            if len(pois) > 0:
+                sample_poi = pois.iloc[0]
+                logger.debug(f"Sample POI name: {sample_poi.get('name')}")
+                logger.debug(f"Sample POI tourism: {sample_poi.get('tourism')}")
+                logger.debug(f"Sample POI coords: ({sample_poi.get('latitude')}, {sample_poi.get('longitude')})")
+            
             return pois
             
         except Exception as e:
-            logger.error(f"Error getting POIs for location: {str(e)}")
+            logger.error(f"Error getting POIs for location: {str(e)}", exc_info=True)
             return pd.DataFrame()
             
     def get_recommendations(
@@ -286,17 +316,25 @@ class HybridRecommender:
             List of recommended POIs
         """
         try:
+            logger.info(f"Getting recommendations for location: {location}")
+            logger.debug(f"User preferences: {user_preferences}")
+            
             # Get POIs for the location
             pois_df = self.get_pois_for_location(location)
             if pois_df.empty:
                 logger.warning(f"No POIs found for location: {location}")
                 return []
-                
+            
             # Apply mobility-based filtering if preferences provided
             if user_preferences.get('mobility'):
-                pois_df = self._apply_mobility_filter(user_preferences['mobility'])
+                logger.info("Applying mobility filter")
+                filtered_df = self._apply_mobility_filter(user_preferences['mobility'], pois_df)
+                logger.info(f"After mobility filter: {len(filtered_df)} POIs")
+                if not filtered_df.empty:
+                    pois_df = filtered_df
             
             # Get content-based recommendations
+            logger.info("Getting content-based recommendations")
             recommendations = self._get_content_based_recommendations(
                 pois_df=pois_df,
                 user_preferences=user_preferences,
@@ -304,59 +342,73 @@ class HybridRecommender:
                 n_recommendations=n_recommendations
             )
             
+            logger.info(f"Generated {len(recommendations)} recommendations")
+            logger.debug(f"Sample recommendation: {recommendations[0] if recommendations else 'No recommendations'}")
+            
             return recommendations
             
         except Exception as e:
-            logger.error(f"Error getting recommendations: {str(e)}")
+            logger.error(f"Error getting recommendations: {str(e)}", exc_info=True)
             return []
-            
-    def _apply_mobility_filter(self, mobility_prefs: Dict) -> pd.DataFrame:
+
+    def _apply_mobility_filter(self, mobility_prefs: Dict, pois_df: pd.DataFrame) -> pd.DataFrame:
         """Apply mobility-based filtering to POIs."""
-        filtered_df = self.pois_df.copy()
-        
-        mode = mobility_prefs.get('mode', 'walking')
-        max_distance = mobility_prefs.get('max_distance', 5.0)
-        
-        # Find relevant distance columns based on transport mode
-        distance_cols = [col for col in filtered_df.columns 
-                        if 'distance' in col.lower()]
-        
-        if distance_cols:
-            # Use the minimum distance across all available transport modes
-            filtered_df['min_distance'] = filtered_df[distance_cols].min(axis=1)
-            filtered_df = filtered_df[
-                filtered_df['min_distance'] <= max_distance
-            ]
-        
-        # Apply mode-specific filtering if relevant columns exist
-        mode_cols = {
-            'walking': 'walking',
-            'cycling': 'cycling',
-            'public_transport': ['bus', 'tram', 'train']
-        }
-        
-        if mode in mode_cols:
-            mode_terms = mode_cols[mode]
-            if isinstance(mode_terms, str):
-                mode_terms = [mode_terms]
-                
-            # Find columns related to the transport mode
-            mode_cols = []
-            for term in mode_terms:
-                mode_cols.extend([
-                    col for col in filtered_df.columns
-                    if term in col.lower()
-                ])
+        try:
+            if pois_df.empty:
+                return pd.DataFrame()
             
-            if mode_cols:
-                logger.info(f"Filtering by transport mode columns: {mode_cols}")
-                # Keep POIs that have some activity for the chosen mode
+            filtered_df = pois_df.copy()
+            logger.info("Starting mobility filter with DataFrame shape: %s", filtered_df.shape)
+            
+            mode = mobility_prefs.get('mode', 'walking')
+            max_distance = mobility_prefs.get('max_distance', 5.0)
+            logger.info(f"Filtering for mode: {mode}, max_distance: {max_distance}")
+            
+            # Find relevant distance columns based on transport mode
+            distance_cols = [col for col in filtered_df.columns 
+                           if 'distance' in col.lower() and mode in col.lower()]
+            
+            if distance_cols:
+                logger.info(f"Found distance columns: {distance_cols}")
+                # Use the minimum distance across relevant transport modes
+                filtered_df['min_distance'] = filtered_df[distance_cols].min(axis=1)
                 filtered_df = filtered_df[
-                    filtered_df[mode_cols].sum(axis=1) > 0
+                    filtered_df['min_distance'] <= max_distance
                 ]
-        
-        return filtered_df
-        
+                logger.info(f"After distance filtering, shape: {filtered_df.shape}")
+            
+            # Apply mode-specific filtering if relevant columns exist
+            mode_cols = {
+                'walking': ['walking'],
+                'cycling': ['cycling', 'bicycle'],
+                'public_transport': ['bus', 'tram', 'metro', 'train']
+            }
+            
+            if mode in mode_cols:
+                mode_terms = mode_cols[mode]
+                logger.info(f"Looking for columns with terms: {mode_terms}")
+                
+                # Find columns related to the transport mode
+                mode_cols = []
+                for term in mode_terms:
+                    mode_cols.extend([
+                        col for col in filtered_df.columns
+                        if term in col.lower()
+                    ])
+                
+                if mode_cols:
+                    logger.info(f"Found mode-specific columns: {mode_cols}")
+                    # Keep POIs that have some activity for the chosen mode
+                    mode_mask = filtered_df[mode_cols].notna().any(axis=1)
+                    filtered_df = filtered_df[mode_mask]
+                    logger.info(f"After mode filtering, shape: {filtered_df.shape}")
+            
+            return filtered_df
+            
+        except Exception as e:
+            logger.error(f"Error in mobility filter: {str(e)}", exc_info=True)
+            return pois_df
+
     def _get_location_based_cluster(
         self, 
         location: Tuple[float, float]
@@ -391,64 +443,121 @@ class HybridRecommender:
     ) -> List[Dict]:
         """Get content-based recommendations using TF-IDF and location similarity."""
         try:
-            # Get content similarity scores
-            content_scores = self._get_content_similarity(
-                query=' '.join(user_preferences.get('interests', [])),
-                pois_df=pois_df
-            )
+            logger.info("Starting content-based recommendations")
+            logger.debug(f"Input POIs shape: {pois_df.shape}")
             
-            # Get location similarity scores if current_location provided
+            # Get interests from preferences
+            interests = user_preferences.get('interests', ['tourist_spot'])
+            logger.info(f"User interests: {interests}")
+            
+            # Create query from interests
+            query = ' '.join(interests)
+            logger.info(f"Generated query: {query}")
+            
+            # Get content similarity scores
+            content_scores = self._get_content_similarity(query, pois_df)
+            logger.info(f"Generated content scores shape: {content_scores.shape if hasattr(content_scores, 'shape') else len(content_scores)}")
+            
+            # Get location similarity if current_location provided
             location_scores = None
             if current_location:
+                logger.info("Calculating location similarity")
                 location_scores = self._get_location_similarity(current_location, pois_df)
             
             # Combine scores
             final_scores = content_scores
             if location_scores is not None:
+                logger.info("Combining content and location scores")
                 final_scores = 0.7 * content_scores + 0.3 * location_scores
             
-            # Get top N recommendations
-            top_indices = final_scores.argsort()[-n_recommendations:][::-1]
+            # Define type weights for diversity
+            type_weights = {
+                'museum': 0.7,  # Reduce museum weight
+                'gallery': 0.8,
+                'artwork': 0.9,
+                'attraction': 1.0,  # Keep general attractions at full weight
+                'viewpoint': 1.0,
+                'theme_park': 1.0,
+                'zoo': 1.0,
+                'aquarium': 1.0,
+                'park': 0.9,
+                'garden': 0.9,
+                'historic_site': 0.8,
+                'monument': 0.9,
+                'castle': 1.0,
+                'ruins': 0.9,
+                'entertainment': 1.0,
+                'theater': 0.9,
+                'cinema': 0.8,
+                'arts_centre': 0.8
+            }
             
-            # Convert to list of dictionaries
+            # Create a list of (index, score, poi) tuples for sorting
+            scored_pois = []
+            for i in range(len(pois_df)):
+                poi = pois_df.iloc[i]
+                score = final_scores[i]
+                
+                # Apply type weight
+                poi_type = poi.get('tourism', 'attraction').lower()
+                weight = type_weights.get(poi_type, 1.0)
+                score *= weight
+                
+                scored_pois.append((i, score, poi))
+            
+            # Sort by score
+            scored_pois.sort(key=lambda x: x[1], reverse=True)
+            
+            # Track type counts for diversity
+            type_counts = {}
+            max_per_type = max(2, n_recommendations // 3)  # Allow at most 1/3 of recommendations to be the same type
+            
+            # Get recommendations, ensuring diversity
             recommendations = []
-            for idx in top_indices:
-                poi = pois_df.iloc[idx]
-                recommendations.append({
-                    'name': poi['name'],
-                    'tourism': poi['tourism'],
-                    'latitude': poi['latitude'],
-                    'longitude': poi['longitude'],
-                    'score': float(final_scores[idx]),
+            for idx, score, poi in scored_pois:
+                if len(recommendations) >= n_recommendations:
+                    break
+                    
+                name = poi.get('name')
+                if not name or pd.isna(name):
+                    logger.warning(f"Skipping POI at index {idx} due to missing name")
+                    continue
+                
+                # Get POI type and check if we have too many of this type
+                tourism = poi.get('tourism', 'attraction').lower()
+                if tourism not in type_counts:
+                    type_counts[tourism] = 0
+                if type_counts[tourism] >= max_per_type:
+                    logger.info(f"Skipping {name} because we already have {max_per_type} of type {tourism}")
+                    continue
+                type_counts[tourism] += 1
+                
+                latitude = poi.get('latitude')
+                longitude = poi.get('longitude')
+                if pd.isna(latitude) or pd.isna(longitude):
+                    logger.warning(f"POI {name} has invalid coordinates: ({latitude}, {longitude})")
+                    latitude = longitude = None
+                
+                recommendation = {
+                    'name': name,
+                    'type': tourism,
+                    'latitude': latitude,
+                    'longitude': longitude,
+                    'score': float(score),
                     'distance': self._calculate_distance(
                         current_location,
-                        (poi['latitude'], poi['longitude'])
-                    ) if current_location else None
-                })
+                        (latitude, longitude)
+                    ) if current_location and latitude and longitude else None
+                }
+                logger.debug(f"Created recommendation: {recommendation}")
+                recommendations.append(recommendation)
             
+            logger.info(f"Returning {len(recommendations)} recommendations with type distribution: {type_counts}")
             return recommendations
             
         except Exception as e:
-            logger.error(f"Error in content-based recommendations: {str(e)}")
+            logger.error(f"Error in content-based recommendations: {str(e)}", exc_info=True)
             return []
-            
-    def _calculate_distance(self, point1: Tuple[float, float], point2: Tuple[float, float]) -> float:
-        """Calculate distance between two points in kilometers."""
-        from math import sin, cos, sqrt, atan2, radians
-        
-        # Approximate radius of earth in km
-        R = 6371.0
-        
-        lat1, lon1 = radians(point1[0]), radians(point1[1])
-        lat2, lon2 = radians(point2[0]), radians(point2[1])
-        
-        dlon = lon2 - lon1
-        dlat = lat2 - lat1
-        
-        a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
-        c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        
-        return R * c
         
     def _get_location_similarity(
         self,
