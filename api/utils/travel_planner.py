@@ -99,14 +99,6 @@ class DummyPlanner:
                 "location": location,
                 "description": "Popular local cuisine in " + location
             })
-        if not attractions:  # Default attraction if no matching interests
-            attractions.append({
-                "name": "Popular Attraction",
-                "type": "attraction",
-                "rating": 4.0,
-                "location": location,
-                "description": "Must-visit attraction in " + location
-            })
         return attractions
                 
     def _get_city_coordinates(self, city):
@@ -156,64 +148,60 @@ class TravelPlanner:
                 "message": f"Error finding route: {str(e)}"
             }
         
-    def get_attractions(self, location: str, interests: List[str], preferences: Optional[TravelPreferences] = None) -> List[Dict]:
-        """Get attractions for a location based on interests and preferences."""
+    def get_attractions(
+        self,
+        location: str,
+        user_preferences: Dict
+    ) -> List[Dict]:
+        """Get attractions for a location."""
         try:
-            logger.info(f"Getting attractions for location: {location}, interests: {interests}")
+            logger.info(f"Getting attractions for location: {location}, interests: {user_preferences.get('interests', [])}")
             
-            if not self.recommender:
-                logger.warning("No recommender available, using dummy planner")
-                return self.planner.get_attractions(location, interests)
-
-            # Convert interests to user preferences format
-            user_preferences = {
-                'interests': interests,
-                'mobility': {
-                    'mode': 'walking',
-                    'max_distance': 2.0
-                }
+            # Format user preferences
+            formatted_preferences = {
+                'interests': user_preferences.get('interests', ['tourist_spot']),
+                'mobility': user_preferences.get('mobility', {'mode': 'walking', 'max_distance': 2.0}),
+                'accessibility': user_preferences.get('accessibility', {})
             }
-            logger.info(f"Created user preferences: {user_preferences}")
-
-            # Add accessibility preferences if provided
-            if preferences and preferences.accessibility_required:
-                user_preferences['mobility']['accessibility_required'] = True
-                logger.info("Added accessibility requirements")
-
-            # Get recommendations from recommender
+            logger.info(f"Created user preferences: {formatted_preferences}")
+            
+            # Call recommender.get_recommendations
             logger.info("Calling recommender.get_recommendations...")
             recommendations = self.recommender.get_recommendations(
-                location=location.lower(),  # Convert to lowercase to match city names
-                user_preferences=user_preferences
+                location=location,
+                user_preferences=formatted_preferences
             )
             logger.info(f"Got {len(recommendations)} recommendations")
-            logger.debug(f"Raw recommendations: {recommendations}")
-
-            # Format recommendations
+            
+            # If no recommendations found, return empty list
+            if not recommendations:
+                logger.info("No recommendations found, returning empty list")
+                return []
+            
+            # Format attractions for response, skipping any with unknown names
             formatted_attractions = []
-            for i, rec in enumerate(recommendations):
-                logger.debug(f"Processing recommendation {i}: {rec}")
-                if not rec.get('name'):
-                    logger.warning(f"Skipping recommendation {i} due to missing name")
+            for rec in recommendations:
+                name = rec.get('name', '').strip()
+                if not name or name.lower() == 'unknown':
+                    logger.warning(f"Skipping recommendation due to invalid name: {name}")
                     continue
-                    
-                formatted = {
-                    'name': rec['name'],
-                    'type': rec.get('tourism', 'tourist_spot'),
-                    'rating': float(rec.get('score', 4.0)),
-                    'location': {
-                        'latitude': rec.get('latitude'),
-                        'longitude': rec.get('longitude')
-                    },
-                    'distance': rec.get('distance')
+                
+                attraction = {
+                    'name': name,
+                    'type': rec.get('type', 'attraction').lower(),
+                    'rating': rec.get('rating', 0),
+                    'location': location
                 }
-                logger.debug(f"Formatted recommendation {i}: {formatted}")
-                formatted_attractions.append(formatted)
-
+                
+                # Add distance if available
+                if 'distance' in rec and rec['distance'] is not None:
+                    attraction['distance'] = rec['distance']
+                
+                formatted_attractions.append(attraction)
+            
             logger.info(f"Returning {len(formatted_attractions)} formatted attractions")
             return formatted_attractions
-
+            
         except Exception as e:
             logger.error(f"Error getting attractions: {str(e)}", exc_info=True)
-            # Return dummy attractions on error
-            return self.planner.get_attractions(location, interests)
+            return []

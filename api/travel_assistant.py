@@ -183,6 +183,28 @@ class TravelAssistant:
         logger.debug(f"Extracted locations from query '{query}': {locations}")
         return locations
 
+    def _extract_accessibility_preferences(self, query: str) -> Dict[str, bool]:
+        """Extract accessibility preferences from the query."""
+        accessibility = {}
+        
+        # Check for wheelchair accessibility
+        if any(term in query.lower() for term in ['wheelchair', 'accessible', 'disability']):
+            accessibility['wheelchair_accessible'] = True
+        
+        # Check for elevator access
+        if any(term in query.lower() for term in ['elevator', 'lift']):
+            accessibility['elevator_access'] = True
+        
+        # Check for accessible parking
+        if any(term in query.lower() for term in ['parking', 'disabled parking', 'handicap parking']):
+            accessibility['accessible_parking'] = True
+        
+        # Check for accessible restrooms
+        if any(term in query.lower() for term in ['restroom', 'bathroom', 'toilet']):
+            accessibility['accessible_restroom'] = True
+        
+        return accessibility
+
     def _handle_route_query(self, query: str, entities: Dict) -> TravelResponse:
         """Handle a route-related query."""
         try:
@@ -306,19 +328,42 @@ class TravelAssistant:
             logger.debug(f"Extracted interests: {interests}")
             
             try:
+                # Extract accessibility preferences
+                accessibility = self._extract_accessibility_preferences(query)
+                
+                # Get user preferences including accessibility
+                user_preferences = {
+                    'interests': interests,
+                    'mobility': {'mode': 'walking', 'max_distance': 2.0},
+                    'accessibility': accessibility
+                }
+                
                 # Get attractions from planner
-                attractions = self.planner.get_attractions(location, interests)
+                attractions = self.planner.get_attractions(location, user_preferences)
                 logger.debug(f"Got {len(attractions)} attractions from planner")
                 
                 if not attractions:
-                    # If no attractions found, return default attraction
-                    logger.debug("No attractions found, using default")
-                    attractions = [{
-                        "name": "Popular Attraction",
-                        "type": interests[0],
-                        "rating": 4.0,
-                        "location": location
-                    }]
+                    # Create a more specific error message based on accessibility requirements
+                    error_msg = f"I couldn't find any attractions in {location}"
+                    if accessibility:
+                        features = []
+                        if accessibility.get('wheelchair_accessible'):
+                            features.append("wheelchair accessibility")
+                        if accessibility.get('elevator_access'):
+                            features.append("elevator access")
+                        if accessibility.get('accessible_parking'):
+                            features.append("accessible parking")
+                        if accessibility.get('accessible_restroom'):
+                            features.append("accessible restrooms")
+                        
+                        error_msg += f" with {' and '.join(features)}"
+                    error_msg += ". You might want to try a different location or modify your accessibility requirements."
+                    
+                    return TravelResponse(
+                        intent="find_attraction",
+                        entities={"location": location},
+                        error=error_msg
+                    )
                 
                 # Format attractions for response
                 formatted_attractions = []
@@ -477,7 +522,8 @@ class TravelAssistant:
         elif response.intent == "find_attraction":
             # Create a more informative response for attractions
             if not response.attractions:
-                return f"I couldn't find any attractions in {response.entities.get('location', 'that location')}"
+                location = response.entities.get('location', 'that location')
+                return f"I couldn't find any attractions in {location} matching your criteria. Try broadening your search or try a different location."
                 
             text_parts = [f"Here are some popular attractions in {response.entities.get('location', 'that location')}:"]
             

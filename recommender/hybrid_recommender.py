@@ -296,6 +296,56 @@ class HybridRecommender:
             logger.error(f"Error getting POIs for location: {str(e)}", exc_info=True)
             return pd.DataFrame()
             
+    def _filter_pois(self, pois_df: pd.DataFrame, location: str, accessibility: Optional[Dict] = None) -> pd.DataFrame:
+        """Filter POIs based on location and accessibility requirements."""
+        try:
+            logger.info(f"Filtering POIs for location: {location}")
+            
+            # Basic location filtering
+            location = location.lower()
+            location_mask = pois_df['city'].str.lower() == location
+            filtered_df = pois_df[location_mask].copy()
+            logger.info(f"Found {len(filtered_df)} attraction POIs for {location}")
+            
+            # Apply accessibility filters if specified
+            if accessibility:
+                logger.info(f"Applying accessibility filters: {accessibility}")
+                logger.debug(f"Available columns: {filtered_df.columns.tolist()}")
+                
+                # Map our accessibility keys to possible column names
+                accessibility_columns = {
+                    'wheelchair_accessible': ['wheelchair', 'wheelchair_access', 'accessible'],
+                    'elevator_access': ['elevator', 'has_elevator', 'lift'],
+                    'accessible_parking': ['parking_disabled', 'disabled_parking', 'handicap_parking'],
+                    'accessible_restroom': ['toilets_wheelchair', 'wheelchair_toilet', 'accessible_toilet']
+                }
+                
+                for feature, possible_columns in accessibility_columns.items():
+                    if accessibility.get(feature):
+                        # Find which column exists in our DataFrame
+                        existing_column = next((col for col in possible_columns if col in filtered_df.columns), None)
+                        
+                        if existing_column:
+                            logger.info(f"Found column {existing_column} for {feature}")
+                            # For wheelchair accessibility, accept both 'yes' and 'limited'
+                            if feature == 'wheelchair_accessible':
+                                filtered_df = filtered_df[
+                                    filtered_df[existing_column].fillna('no').str.lower().isin(['yes', 'limited'])
+                                ]
+                            else:
+                                filtered_df = filtered_df[
+                                    filtered_df[existing_column].fillna('no').str.lower() == 'yes'
+                                ]
+                            logger.info(f"After {feature} filter: {len(filtered_df)} POIs")
+                        else:
+                            logger.warning(f"No column found for {feature}. Tried columns: {possible_columns}")
+            
+            return filtered_df
+            
+        except Exception as e:
+            logger.error(f"Error in POI filtering: {str(e)}", exc_info=True)
+            return pd.DataFrame()
+
     def get_recommendations(
         self,
         location: str,
@@ -304,7 +354,7 @@ class HybridRecommender:
         n_recommendations: int = 10
     ) -> List[Dict]:
         """
-        Get recommendations for a location.
+        Get recommendations for a location based on user preferences.
         
         Args:
             location: Location to get recommendations for
@@ -317,41 +367,39 @@ class HybridRecommender:
         """
         try:
             logger.info(f"Getting recommendations for location: {location}")
-            logger.debug(f"User preferences: {user_preferences}")
             
-            # Get POIs for the location
-            pois_df = self.get_pois_for_location(location)
+            # Get accessibility preferences
+            accessibility = user_preferences.get('accessibility', {})
+            
+            # Filter POIs for location and accessibility
+            pois_df = self._filter_pois(self.pois_df, location, accessibility)
+            
             if pois_df.empty:
                 logger.warning(f"No POIs found for location: {location}")
                 return []
             
-            # Apply mobility-based filtering if preferences provided
-            if user_preferences.get('mobility'):
-                logger.info("Applying mobility filter")
-                filtered_df = self._apply_mobility_filter(user_preferences['mobility'], pois_df)
-                logger.info(f"After mobility filter: {len(filtered_df)} POIs")
-                if not filtered_df.empty:
-                    pois_df = filtered_df
+            # Apply mobility filter if needed
+            mobility = user_preferences.get('mobility')
+            if mobility:
+                pois_df = self._apply_mobility_filter(pois_df, mobility)
+                logger.info(f"After mobility filter: {len(pois_df)} POIs")
             
             # Get content-based recommendations
-            logger.info("Getting content-based recommendations")
             recommendations = self._get_content_based_recommendations(
-                pois_df=pois_df,
-                user_preferences=user_preferences,
-                current_location=current_location,
-                n_recommendations=n_recommendations
+                pois_df,
+                user_preferences,
+                current_location,
+                n_recommendations
             )
             
             logger.info(f"Generated {len(recommendations)} recommendations")
-            logger.debug(f"Sample recommendation: {recommendations[0] if recommendations else 'No recommendations'}")
-            
             return recommendations
             
         except Exception as e:
             logger.error(f"Error getting recommendations: {str(e)}", exc_info=True)
             return []
 
-    def _apply_mobility_filter(self, mobility_prefs: Dict, pois_df: pd.DataFrame) -> pd.DataFrame:
+    def _apply_mobility_filter(self, pois_df: pd.DataFrame, mobility_prefs: Dict) -> pd.DataFrame:
         """Apply mobility-based filtering to POIs."""
         try:
             if pois_df.empty:
@@ -492,14 +540,31 @@ class HybridRecommender:
                 'arts_centre': 0.8
             }
             
+            # Define valid attraction types
+            valid_types = {
+                'museum', 'gallery', 'artwork', 'attraction', 'viewpoint',
+                'theme_park', 'zoo', 'aquarium', 'park', 'garden',
+                'historic_site', 'monument', 'castle', 'ruins',
+                'entertainment', 'theater', 'cinema', 'arts_centre',
+                'tourist_spot'
+            }
+            
             # Create a list of (index, score, poi) tuples for sorting
             scored_pois = []
             for i in range(len(pois_df)):
                 poi = pois_df.iloc[i]
                 score = final_scores[i]
                 
-                # Apply type weight
+                # Skip POIs with unknown names or invalid types
+                name = poi.get('name')
+                if not name or pd.isna(name) or name.lower() == 'unknown':
+                    continue
+                    
                 poi_type = poi.get('tourism', 'attraction').lower()
+                if poi_type not in valid_types and poi_type != 'attraction':
+                    continue
+                
+                # Apply type weight
                 weight = type_weights.get(poi_type, 1.0)
                 score *= weight
                 
@@ -519,12 +584,9 @@ class HybridRecommender:
                     break
                     
                 name = poi.get('name')
-                if not name or pd.isna(name):
-                    logger.warning(f"Skipping POI at index {idx} due to missing name")
-                    continue
+                tourism = poi.get('tourism', 'attraction').lower()
                 
                 # Get POI type and check if we have too many of this type
-                tourism = poi.get('tourism', 'attraction').lower()
                 if tourism not in type_counts:
                     type_counts[tourism] = 0
                 if type_counts[tourism] >= max_per_type:
@@ -552,13 +614,42 @@ class HybridRecommender:
                 logger.debug(f"Created recommendation: {recommendation}")
                 recommendations.append(recommendation)
             
+            # If we don't have enough recommendations, reduce max_per_type and try again
+            if len(recommendations) < n_recommendations and len(scored_pois) > len(recommendations):
+                logger.info("Not enough recommendations, trying with increased type limits")
+                remaining_slots = n_recommendations - len(recommendations)
+                for idx, score, poi in scored_pois:
+                    if len(recommendations) >= n_recommendations:
+                        break
+                    
+                    name = poi.get('name')
+                    if any(r['name'] == name for r in recommendations):
+                        continue
+                    
+                    tourism = poi.get('tourism', 'attraction').lower()
+                    latitude = poi.get('latitude')
+                    longitude = poi.get('longitude')
+                    
+                    recommendation = {
+                        'name': name,
+                        'type': tourism,
+                        'latitude': latitude,
+                        'longitude': longitude,
+                        'score': float(score),
+                        'distance': self._calculate_distance(
+                            current_location,
+                            (latitude, longitude)
+                        ) if current_location and latitude and longitude else None
+                    }
+                    recommendations.append(recommendation)
+            
             logger.info(f"Returning {len(recommendations)} recommendations with type distribution: {type_counts}")
             return recommendations
             
         except Exception as e:
             logger.error(f"Error in content-based recommendations: {str(e)}", exc_info=True)
             return []
-        
+
     def _get_location_similarity(
         self,
         current_location: Tuple[float, float],
