@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Any, Tuple
 import json
 import os
 import networkx as nx
-from recommender.hybrid_recommender import HybridRecommender
+from .recommender.hybrid_recommender import HybridRecommender
 
 logger = logging.getLogger(__name__)
 

@@ -1,16 +1,21 @@
 import sys
 import os
 from datetime import timedelta
-from flask import Flask, jsonify
+from flask import Flask, jsonify, g
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
+import sqlite3
 
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-from models import db
+# Add the backend directory to the Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
+
+from api.models import db
 from api.routes.auth import auth_bp
 from api.routes.chat import chat_bp
 from api.routes.accommodation import accommodation_bp
+from api.routes.favorites import favorites_bp
 
 def create_app():
     app = Flask(__name__)
@@ -40,15 +45,29 @@ def create_app():
     # Register blueprints
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(chat_bp, url_prefix='/api/chat')
-    app.register_blueprint(accommodation_bp, url_prefix='/api')  # Keep this as /api since routes already include /accommodations
+    app.register_blueprint(accommodation_bp, url_prefix='/api')
+    app.register_blueprint(favorites_bp, url_prefix='/api/favorites')
     
     # Health check endpoint
     @app.route('/api/health')
     def health_check():
         return jsonify({"status": "healthy"}), 200
         
+    def get_db():
+        db = getattr(g, '_database', None)
+        if db is None:
+            db = g._database = sqlite3.connect(app.config['SQLALCHEMY_DATABASE_URI'].replace('sqlite:///', ''))
+            db.execute("PRAGMA foreign_keys = ON")  # Enable foreign key support
+        return db
+
+    @app.before_request
+    def before_request():
+        g.db = get_db()
+        
     return app
 
+app = create_app()
+
 if __name__ == '__main__':
-    app = create_app()
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    from config import Config
+    app.run(debug=True, port=Config.API_PORT)

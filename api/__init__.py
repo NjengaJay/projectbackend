@@ -6,6 +6,7 @@ from .models import db
 from .routes.auth import auth_bp
 from .routes.chat import chat_bp
 from .routes.accommodation import accommodation_bp
+from .routes.favorites import favorites_bp
 
 def create_app():
     app = Flask(__name__)
@@ -35,5 +36,6 @@ def create_app():
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(chat_bp, url_prefix='/api/chat')
     app.register_blueprint(accommodation_bp, url_prefix='/api')  # Keep this as /api since routes already include /accommodations
+    app.register_blueprint(favorites_bp, url_prefix='/api/favorites')
     
     return app

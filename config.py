@@ -5,8 +5,14 @@ load_dotenv()
 
 class Config:
     # Database
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/trip_planner')
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///instance/travel_assistant.db'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'connect_args': {
+            'check_same_thread': False,
+            'foreign_keys': True  # Enable foreign key support
+        }
+    }
     
     # Security
     SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key')

@@ -1,13 +1,16 @@
 """Travel Planner module for handling route planning and POI recommendations."""
 import logging
 import os
+import sys
 import pandas as pd
 from pathlib import Path
 from enum import Enum
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from backend.recommender.hybrid_recommender import HybridRecommender
+# Use relative import for recommender
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from recommender.hybrid_recommender import HybridRecommender
 
 logger = logging.getLogger(__name__)
 

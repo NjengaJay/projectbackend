@@ -7,6 +7,9 @@ import math
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
+from tqdm import tqdm
+from scipy.spatial import cKDTree
+import numpy as np
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -202,15 +205,21 @@ class TransportGraph:
         
     def add_node(self, node: Node) -> None:
         """Add a node to the graph"""
-        if node.id not in self.nodes:
-            self.nodes[node.id] = node
-            self.graph.add_node(
-                node.id,
-                node_type=node.node_type,
-                name=node.name,
-                pos=(node.longitude, node.latitude),
-                wheelchair_accessible=node.wheelchair_accessible
-            )
+        # Store node object in self.nodes
+        self.nodes[node.id] = node
+        
+        # Add node to networkx graph with its attributes
+        self.graph.add_node(
+            node.id,
+            name=node.name,
+            latitude=node.latitude,
+            longitude=node.longitude,
+            node_type=node.node_type,
+            wheelchair_accessible=node.wheelchair_accessible
+        )
+        
+        if len(self.nodes) % 1000 == 0:
+            logger.debug(f"Added {len(self.nodes)} nodes to graph")
             
     def add_edge(self, start_node: str, end_node: str, transport_mode: str,
                 travel_time: float, cost: float, distance: float,
@@ -273,51 +282,126 @@ class TransportGraph:
     
     def load_data(self) -> None:
         """Load all required datasets and build the graph"""
-        logger.info("Loading stops...")
-        self._load_stops()
+        progress_bar = tqdm(total=100, desc="Building Graph")
         
-        logger.info("Loading POIs...")
-        self._load_pois()
+        try:
+            logger.info("Loading stops...")
+            self._load_stops()
+            progress_bar.update(15)  # 15% complete
+            
+            logger.info("Loading POIs...")
+            self._load_pois()
+            progress_bar.update(15)  # 30% complete
+            
+            logger.info("Loading road network...")
+            self._load_road_network()
+            progress_bar.update(15)  # 45% complete
+            
+            logger.info("Loading transport routes...")
+            self._load_transport_routes()
+            progress_bar.update(15)  # 60% complete
+            
+            logger.info("Creating connections...")
+            self._load_transfers()
+            self._add_walking_connections()
+            progress_bar.update(20)  # 80% complete
+            
+            logger.info("Propagating scenic scores...")
+            self._propagate_scenic_scores()
+            progress_bar.update(10)  # 90% complete
+            
+            # Validate the graph before marking as complete
+            self._validate_graph()
+            progress_bar.update(10)  # 100% complete
+            
+            progress_bar.close()
+            logger.info("Graph loading complete!")
+            
+        except Exception as e:
+            progress_bar.close()
+            logger.error(f"Error during graph building: {str(e)}")
+            # Clear the graph to prevent using a partially built graph
+            self.graph = nx.MultiDiGraph()
+            self.nodes = {}
+            raise RuntimeError(f"Graph building failed: {str(e)}")
+            
+    def _validate_graph(self) -> None:
+        """Validate the built graph"""
+        logger.info("Starting graph validation...")
+        logger.info(f"Number of nodes in self.nodes: {len(self.nodes)}")
+        logger.info(f"Number of nodes in graph: {self.graph.number_of_nodes()}")
+        logger.info(f"Number of edges in graph: {self.graph.number_of_edges()}")
         
-        logger.info("Loading road network...")
-        self._load_road_network()
+        # Check that we have nodes
+        if len(self.graph.nodes) == 0:
+            raise ValueError("Graph has no nodes")
+            
+        # Check that we have edges
+        if len(self.graph.edges) == 0:
+            raise ValueError("Graph has no edges")
+            
+        # Check graph connectivity
+        components = list(nx.weakly_connected_components(self.graph))
+        if not components:
+            raise ValueError("Graph has no connected components")
+            
+        largest_component = max(components, key=len)
+        component_coverage = len(largest_component) / len(self.graph.nodes)
         
-        logger.info("Loading transport routes...")
-        self._load_transport_routes()
-        
-        logger.info("Loading transfers...")
-        self._load_transfers()
-        
-        logger.info("Adding walking connections...")
-        self._add_walking_connections()
-        
-        logger.info("Graph loading complete!")
+        # Since we're now only using active stops, we expect better connectivity
+        if component_coverage < 0.9:  # Increased from 0.8 since we're using filtered stops
+            raise ValueError(
+                f"Graph validation failed: Largest component only covers {component_coverage:.1%} of nodes. "
+                "This suggests a problem with the graph building process."
+            )
+            
+        logger.info(f"Graph validation passed. Largest component covers {component_coverage:.1%} of nodes")
         
     def _load_stops(self) -> None:
         """Load public transport stops from filtered dataset"""
-        stops_file = self.data_dir / "filtered_data" / "major_stops.csv"
+        logger.info("Loading stops...")
+        
+        # Load stop times first to get active stop IDs
+        stop_times_file = self.data_dir / "csv_output" / "stop_times_cleaned_final.csv"
+        if not stop_times_file.exists():
+            logger.warning("Stop times file not found, using all stops")
+            active_stop_ids = None
+        else:
+            stop_times_df = pd.read_csv(stop_times_file)
+            active_stop_ids = set(stop_times_df['stop_id'].unique())
+            logger.info(f"Found {len(active_stop_ids)} active stops in stop_times")
+        
+        # Load stops data
+        stops_file = self.data_dir / "csv_output" / "stops_cleaned_filled_final.csv"
         if not stops_file.exists():
-            raise RuntimeError(f"Major stops file not found: {stops_file}. Please run create_filtered_dataset.py first.")
+            logger.warning("Stops file not found")
+            return
             
         stops_df = pd.read_csv(stops_file)
-        logger.info(f"Loading {len(stops_df)} stops from major cities")
         
+        # Filter to only active stops if we have that info
+        if active_stop_ids is not None:
+            original_len = len(stops_df)
+            stops_df = stops_df[stops_df['stop_id'].isin(active_stop_ids)]
+            logger.info(f"Filtered stops from {original_len} to {len(stops_df)} active stops")
+        
+        # Add stops to graph
         for _, row in stops_df.iterrows():
-            node = Node(
+            stop_node = Node(
                 id=f"stop_{row['stop_id']}",
                 name=row['stop_name'],
                 latitude=row['stop_lat'],
                 longitude=row['stop_lon'],
                 node_type='stop',
-                wheelchair_accessible=bool(row.get('wheelchair_boarding', 0))
+                wheelchair_accessible=row.get('wheelchair_boarding', False)
             )
-            self.add_node(node)
+            self.add_node(stop_node)
             
-        logger.info("Finished loading stops")
-            
+        logger.info(f"Added {len(stops_df)} stops to graph")
+
     def _load_pois(self) -> None:
         """Load points of interest"""
-        pois_file = self.data_dir / "csv_output" / "pois_with_scenic_scores.csv"
+        pois_file = self.data_dir / "csv_output" / "pois_with_scenic_scores_cleaned.csv"
         if not pois_file.exists():
             raise RuntimeError(f"POIs file not found: {pois_file}")
             
@@ -334,10 +418,12 @@ class TransportGraph:
                 wheelchair_accessible=row.get('wheelchair', False)
             )
             self.add_node(node)
+            # Store scenic score in node attributes
+            self.graph.nodes[node.id]['scenic_score'] = float(row['scenic_score'])
             
     def _load_road_network(self) -> None:
         """Load road network and add edges between nodes"""
-        roads_file = self.data_dir / "csv_output" / "filtered_roads_cleaned.csv"
+        roads_file = self.data_dir / "csv_output" / "filtered_roads_cleaned_final.csv"
         if not roads_file.exists():
             raise RuntimeError(f"Roads file not found: {roads_file}")
             
@@ -345,85 +431,166 @@ class TransportGraph:
         logger.info(f"Loaded {len(roads_df)} road segments")
         
         for _, row in roads_df.iterrows():
-            # Parse geometry string to get coordinates
-            # Format: 'LINESTRING (lon1 lat1, lon2 lat2)'
             try:
                 coords = row['geometry'].strip('LINESTRING ()').split(',')
                 start_coords = coords[0].strip().split()
                 end_coords = coords[-1].strip().split()
                 
-                # Calculate distance using start and end points
                 start_lat, start_lon = float(start_coords[1]), float(start_coords[0])
                 end_lat, end_lon = float(end_coords[1]), float(end_coords[0])
                 distance = self.haversine_distance(start_lat, start_lon, end_lat, end_lon)
                 
-                # Calculate travel time based on maxspeed
-                max_speed = float(row.get('maxspeed', 50))  # Default 50 km/h if not specified
+                # Calculate travel time based on maxspeed and road type
+                max_speed = float(row['maxspeed']) if pd.notnull(row['maxspeed']) else 50
                 travel_time = (distance / max_speed) * 60  # Convert to minutes
                 
-                # Create road nodes
-                start_node = Node(
-                    id=f"road_{row['name']}_{start_lat}_{start_lon}",
-                    name=f"{row['name']} Start",
-                    latitude=start_lat,
-                    longitude=start_lon,
-                    node_type='road'
-                )
-                end_node = Node(
-                    id=f"road_{row['name']}_{end_lat}_{end_lon}",
-                    name=f"{row['name']} End",
-                    latitude=end_lat,
-                    longitude=end_lon,
-                    node_type='road'
-                )
+                # Calculate scenic value based on road attributes
+                scenic_value = 0.0
                 
-                self.add_node(start_node)
-                self.add_node(end_node)
+                # Roads near water or in parks are more scenic
+                if row.get('bridge') == 'yes':
+                    scenic_value += 0.2  # Bridge views are often scenic
+                    
+                # Surface type affects scenic value
+                surface = row.get('surface', '').lower()
+                if surface in ['asphalt', 'paved']:
+                    scenic_value += 0.1  # Well-maintained roads
+                elif surface in ['unpaved', 'gravel']:
+                    scenic_value += 0.15  # More natural/rural feel
+                    
+                # Road type affects scenic value
+                highway = row.get('highway', '').lower()
+                if highway in ['pedestrian', 'cycleway', 'footway']:
+                    scenic_value += 0.2  # Dedicated paths are often in nice areas
+                elif highway in ['residential', 'living_street']:
+                    scenic_value += 0.15  # Local streets can be charming
+                elif highway in ['primary', 'secondary']:
+                    scenic_value += 0.05  # Main roads less scenic
+                
+                # Normalize scenic value to 0-1 range
+                scenic_value = min(1.0, scenic_value)
+                
+                # Create unique node IDs for road endpoints
+                start_node = f"road_{start_lat:.6f}_{start_lon:.6f}"
+                end_node = f"road_{end_lat:.6f}_{end_lon:.6f}"
+                
+                # Add nodes if they don't exist
+                for node_id, lat, lon in [(start_node, start_lat, start_lon), 
+                                        (end_node, end_lat, end_lon)]:
+                    if node_id not in self.nodes:
+                        node = Node(
+                            id=node_id,
+                            name=f"Road Junction at {lat:.6f}, {lon:.6f}",
+                            latitude=lat,
+                            longitude=lon,
+                            node_type='junction'
+                        )
+                        self.add_node(node)
                 
                 # Add road segment as edge
                 self.add_edge(
-                    start_node=start_node.id,
-                    end_node=end_node.id,
-                    transport_mode="road",
+                    start_node, end_node,
+                    transport_mode='road',
                     travel_time=travel_time,
-                    cost=distance * 0.1,  # Approximate cost based on distance
+                    cost=0,  # Assume road travel is free
                     distance=distance,
-                    wheelchair_accessible=True
+                    wheelchair_accessible=True,  # Assume roads are accessible by default
+                    scenic_value=scenic_value,
+                    bidirectional=row.get('oneway', 'no').lower() != 'yes'
                 )
-            except Exception as e:
-                logger.warning(f"Error processing road segment: {e}")
                 
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Error processing road segment: {str(e)}")
+                continue
+
     def _load_transport_routes(self) -> None:
-        """Load public transport routes and add edges"""
-        routes_file = self.data_dir / "csv_output" / "netherlands-transport-cleaned.csv"
-        if not routes_file.exists():
-            raise RuntimeError(f"Transport routes file not found: {routes_file}")
-            
-        routes_df = pd.read_csv(routes_file)
-        logger.info(f"Loaded {len(routes_df)} transport routes")
+        """Load public transport routes and add edges between connected stops"""
+        logger.info("Loading transport routes from stop times...")
         
-        for _, row in routes_df.iterrows():
-            # Determine transport mode
-            if row.get('bus'):
-                mode = 'bus'
-            elif row.get('public_transport') == 'station':
-                mode = 'train'
-            else:
-                mode = row.get('public_transport', 'bus')  # Default to bus if unknown
+        # Load stop times data
+        stop_times_file = self.data_dir / "csv_output" / "stop_times_cleaned_final.csv"
+        if not stop_times_file.exists():
+            logger.warning("Stop times file not found, skipping route connections")
+            return
+            
+        stop_times_df = pd.read_csv(stop_times_file)
+        logger.info(f"Loaded {len(stop_times_df)} stop times")
+        
+        # Sort by trip_id and stop_sequence
+        stop_times_df = stop_times_df.sort_values(['trip_id', 'stop_sequence'])
+        
+        # Create a dictionary to store the best connections between stops
+        connections = {}  # (from_stop, to_stop) -> {'distance': X, 'time': Y, 'cost': Z, 'count': N}
+        
+        # Process each trip to find connections
+        for trip_id, trip_stops in stop_times_df.groupby('trip_id'):
+            # Get consecutive pairs of stops in this trip
+            for i in range(len(trip_stops) - 1):
+                current = trip_stops.iloc[i]
+                next_stop = trip_stops.iloc[i + 1]
                 
-            # Create stop node
-            stop_node = Node(
-                id=f"stop_{row['name']}_{row['latitude']}_{row['longitude']}",
-                name=row['name'],
-                latitude=row['latitude'],
-                longitude=row['longitude'],
-                node_type='stop',
-                wheelchair_accessible=row.get('wheelchair', False)
-            )
-            self.add_node(stop_node)
-            
-            # Add edges to nearby stops (will be connected via _add_walking_connections)
-            
+                # Create key for this stop pair
+                pair_key = (current['stop_id'], next_stop['stop_id'])
+                
+                # Calculate metrics
+                distance = float(next_stop['shape_dist_traveled'] - current['shape_dist_traveled'])
+                fare = float(next_stop['fare_units_traveled'] - current['fare_units_traveled'])
+                
+                try:
+                    current_time = pd.to_datetime(current['departure_time'])
+                    next_time = pd.to_datetime(next_stop['arrival_time'])
+                    travel_time = (next_time - current_time).total_seconds() / 60  # Convert to minutes
+                except (ValueError, pd.errors.OutOfBoundsDatetime):
+                    travel_time = distance / 500  # Estimate: 30 km/h = 0.5 km/min
+                
+                # Ensure positive values
+                distance = max(0.001, distance)  # At least 1m
+                travel_time = max(0.1, travel_time)  # At least 6 seconds
+                fare = max(0, fare)
+                
+                # Update connection info
+                if pair_key not in connections:
+                    connections[pair_key] = {
+                        'distance': distance,
+                        'time': travel_time,
+                        'cost': fare,
+                        'count': 1
+                    }
+                else:
+                    # Update metrics:
+                    # - Keep the shortest distance (it's fixed)
+                    # - Keep the minimum travel time (fastest connection)
+                    # - Keep the minimum fare (cheapest connection)
+                    # - Count how many trips use this connection
+                    conn = connections[pair_key]
+                    conn['distance'] = min(conn['distance'], distance)
+                    conn['time'] = min(conn['time'], travel_time)
+                    conn['cost'] = min(conn['cost'], fare)
+                    conn['count'] += 1
+        
+        # Add edges for each unique connection
+        logger.info(f"Found {len(connections)} unique stop connections")
+        edges_added = 0
+        
+        for (from_stop, to_stop), metrics in connections.items():
+            try:
+                self.add_edge(
+                    start_node=f"stop_{from_stop}",
+                    end_node=f"stop_{to_stop}",
+                    transport_mode='bus',  # Using bus as default mode
+                    travel_time=metrics['time'],
+                    cost=metrics['cost'],
+                    distance=metrics['distance'],
+                    wheelchair_accessible=True,  # We can update this if we have accessibility data
+                    bidirectional=False  # Transit routes are directional
+                )
+                edges_added += 1
+            except KeyError as e:
+                logger.debug(f"Skipping edge {from_stop} -> {to_stop}: {str(e)}")
+                continue
+                
+        logger.info(f"Added {edges_added} edges between stops")
+
     def _load_transfers(self) -> None:
         """Create transfer connections between nearby stops using KD-tree"""
         from scipy.spatial import cKDTree
@@ -441,78 +608,118 @@ class TransportGraph:
         points = np.array([[node.latitude, node.longitude] for node in stop_nodes])
         tree = cKDTree(points)
         
-        # Find all pairs of points within 500m
+        # Find nearest neighbors within 500m for each point
         # Convert 500m to degrees (approximate)
         max_distance_deg = 0.5 / 111  # 111km per degree
-        pairs = tree.query_pairs(max_distance_deg)
+        
+        # Query k=10 nearest neighbors for each point (adjust k based on density)
+        distances, indices = tree.query(points, k=10, distance_upper_bound=max_distance_deg)
         
         transfer_count = 0
-        for i, j in pairs:
-            node1, node2 = stop_nodes[i], stop_nodes[j]
-            
-            # Calculate exact distance
-            distance = self.haversine_distance(
-                node1.latitude, node1.longitude,
-                node2.latitude, node2.longitude
-            )
-            
-            # Connect stops within 500m
-            if distance <= 0.5:  # 500m in km
-                # Walking speed ~5 km/h = 12 minutes per km
-                travel_time = distance * 12
+        with tqdm(total=len(stop_nodes), desc="Creating transfers") as pbar:
+            for i, (dists, idxs) in enumerate(zip(distances, indices)):
+                valid_idxs = idxs[dists < max_distance_deg]
+                valid_idxs = valid_idxs[valid_idxs != i]  # Remove self
                 
-                # Add bidirectional walking connection
-                self.add_edge(
-                    start_node=node1.id,
-                    end_node=node2.id,
-                    transport_mode='walk',
-                    travel_time=travel_time,
-                    cost=0,  # Walking is free
-                    distance=distance,
-                    wheelchair_accessible=node1.wheelchair_accessible and node2.wheelchair_accessible
-                )
-                transfer_count += 1
-                
+                for j in valid_idxs:
+                    if j >= len(stop_nodes):  # Skip invalid indices from KDTree
+                        continue
+                        
+                    node1, node2 = stop_nodes[i], stop_nodes[j]
+                    
+                    # Calculate exact distance
+                    distance = self.haversine_distance(
+                        node1.latitude, node1.longitude,
+                        node2.latitude, node2.longitude
+                    )
+                    
+                    # Connect stops within 500m
+                    if distance <= 0.5:  # 500m in km
+                        # Walking speed ~5 km/h = 12 minutes per km
+                        travel_time = distance * 12
+                        
+                        # Add bidirectional walking connection
+                        self.add_edge(
+                            start_node=node1.id,
+                            end_node=node2.id,
+                            transport_mode='walk',
+                            travel_time=travel_time,
+                            cost=0,  # Walking is free
+                            distance=distance,
+                            wheelchair_accessible=node1.wheelchair_accessible and node2.wheelchair_accessible
+                        )
+                        transfer_count += 1
+                pbar.update(1)
+                    
         logger.info(f"Created {transfer_count} transfer connections")
 
     def _add_walking_connections(self, max_walking_distance: float = 1.0) -> None:
         """Add walking connections between POIs and nearby transport nodes"""
+        from scipy.spatial import cKDTree
+        import numpy as np
+        
         logger.info("Adding walking connections to POIs...")
         
         # Get POIs and transport nodes
         pois = [node for node in self.nodes.values() if node.node_type == 'poi']
         transport_nodes = [node for node in self.nodes.values() 
                          if node.node_type in ('stop', 'road')]
+                         
+        if not pois or not transport_nodes:
+            logger.warning("No POIs or transport nodes found")
+            return
+            
+        # Create KD-tree for transport nodes
+        transport_points = np.array([[node.latitude, node.longitude] for node in transport_nodes])
+        tree = cKDTree(transport_points)
         
-        # Connect POIs to nearby transport nodes
+        # Convert max walking distance to degrees
+        max_distance_deg = max_walking_distance / 111
+        
+        # For each POI, find nearest transport nodes
+        poi_points = np.array([[poi.latitude, poi.longitude] for poi in pois])
+        
+        # Query k=5 nearest transport nodes for each POI
+        distances, indices = tree.query(poi_points, k=5, distance_upper_bound=max_distance_deg)
+        
         connection_count = 0
-        for poi in pois:
-            for node in transport_nodes:
-                # Calculate distance
-                distance = self.haversine_distance(
-                    poi.latitude, poi.longitude,
-                    node.latitude, node.longitude
-                )
+        with tqdm(total=len(pois), desc="Adding POI connections") as pbar:
+            for poi_idx, (dists, idxs) in enumerate(zip(distances, indices)):
+                valid_idxs = idxs[dists < max_distance_deg]
                 
-                # Connect if within walking distance
-                if distance <= max_walking_distance:
-                    # Walking speed ~5 km/h = 12 minutes per km
-                    travel_time = distance * 12
+                for transport_idx in valid_idxs:
+                    if transport_idx >= len(transport_nodes):  # Skip invalid indices
+                        continue
+                        
+                    poi = pois[poi_idx]
+                    node = transport_nodes[transport_idx]
                     
-                    # Add bidirectional walking connection
-                    self.add_edge(
-                        start_node=poi.id,
-                        end_node=node.id,
-                        transport_mode='walk',
-                        travel_time=travel_time,
-                        cost=0,  # Walking is free
-                        distance=distance,
-                        wheelchair_accessible=poi.wheelchair_accessible and node.wheelchair_accessible
+                    # Calculate exact distance
+                    distance = self.haversine_distance(
+                        poi.latitude, poi.longitude,
+                        node.latitude, node.longitude
                     )
-                    connection_count += 1
                     
-        logger.info(f"Added {connection_count} walking connections to POIs")
-
+                    # Connect if within walking distance
+                    if distance <= max_walking_distance:
+                        # Walking speed ~5 km/h = 12 minutes per km
+                        travel_time = distance * 12
+                        
+                        # Add bidirectional walking connection
+                        self.add_edge(
+                            start_node=poi.id,
+                            end_node=node.id,
+                            transport_mode='walk',
+                            travel_time=travel_time,
+                            cost=0,  # Walking is free
+                            distance=distance,
+                            wheelchair_accessible=poi.wheelchair_accessible and node.wheelchair_accessible
+                        )
+                        connection_count += 1
+                pbar.update(1)
+                    
+        logger.info(f"Created {connection_count} POI walking connections")
+        
     def _add_edge(self, edge: Edge) -> None:
         """Add an edge to the graph with all its attributes"""
         # Check if edge with same transport mode already exists
@@ -520,7 +727,6 @@ class TransportGraph:
         if existing_edges:
             for key, data in existing_edges.items():
                 if data['transport_mode'] == edge.transport_mode:
-                    print(f"Edge with transport mode {edge.transport_mode} already exists between {edge.source} and {edge.target}")
                     return
 
         # Add edge with its attributes
@@ -534,20 +740,57 @@ class TransportGraph:
             wheelchair_accessible=edge.wheelchair_accessible,
             scenic_value=edge.scenic_value
         )
-        print(f"Forward edge added successfully")
 
-    def find_shortest_path(self, source: str, target: str, weight: str = 'distance') -> List[str]:
-        """Find shortest path between two nodes using specified weight"""
-        if source not in self.nodes:
-            raise nx.NetworkXNoPath(f"Source node not found: {source}")
-        if target not in self.nodes:
-            raise nx.NetworkXNoPath(f"Target node not found: {target}")
+    def find_shortest_path(self, source: str, target: str, weight: str = 'distance', scenic_preference: float = 0.0) -> tuple:
+        """Find shortest path between two nodes using specified weight
+        
+        Args:
+            source: Source node ID
+            target: Target node ID
+            weight: Weight to use for path finding ('distance', 'time', 'cost')
+            scenic_preference: How much to prioritize scenic routes (0.0 to 1.0)
+            
+        Returns:
+            tuple: (path, total_distance, total_time, total_cost, avg_scenic_value)
+        """
+        if source not in self.nodes or target not in self.nodes:
+            raise ValueError("Source or target node not found in graph")
+            
+        # Create weight function that considers scenic value
+        def edge_weight(u, v, edge_data):
+            base_weight = edge_data.get(weight, float('inf'))
+            if scenic_preference > 0:
+                # Reduce weight for scenic edges (making them more likely to be chosen)
+                scenic_value = edge_data.get('scenic_value', 0.0)
+                return base_weight * (1 - scenic_preference * scenic_value)
+            return base_weight
             
         try:
-            path = nx.shortest_path(self.graph, source, target, weight=weight)
-            return path
+            # Find shortest path using custom weight function
+            path = nx.shortest_path(self.graph, source, target, weight=edge_weight)
+            
+            # Calculate path metrics
+            total_distance = 0
+            total_time = 0
+            total_cost = 0
+            total_scenic = 0
+            
+            for i in range(len(path)-1):
+                edges = self.get_edge_info(path[i], path[i+1])
+                if edges:
+                    # Get the first (best) edge between these nodes
+                    edge = edges[0]
+                    total_distance += edge.get('distance', 0)
+                    total_time += edge.get('travel_time', 0)
+                    total_cost += edge.get('cost', 0)
+                    total_scenic += edge.get('scenic_value', 0)
+            
+            avg_scenic_value = total_scenic / (len(path) - 1) if len(path) > 1 else 0
+            
+            return path, total_distance, total_time, total_cost, avg_scenic_value
+            
         except nx.NetworkXNoPath:
-            raise
+            raise ValueError(f"No path found between {source} and {target}")
         except Exception as e:
             raise ValueError(f"Error finding path: {str(e)}")
 
@@ -577,3 +820,103 @@ class TransportGraph:
         r = 6371
         
         return c * r
+
+    def _calculate_combined_scenic_value(self, base_score: float, nearby_scores: list) -> float:
+        """Calculate combined scenic value using diminishing returns formula
+        
+        Args:
+            base_score: Base scenic score of the road/POI
+            nearby_scores: List of scenic scores from nearby features
+            
+        Returns:
+            Combined scenic score between 0 and 1
+        """
+        if not nearby_scores:
+            return base_score
+            
+        # Sort scores in descending order
+        sorted_scores = sorted(nearby_scores, reverse=True)
+        
+        # Each additional score contributes less
+        combined = base_score
+        for i, score in enumerate(sorted_scores):
+            # Diminishing factor based on position
+            factor = 1.0 / (2 ** i)  # 1, 1/2, 1/4, 1/8, etc.
+            combined += score * factor
+            
+        # Normalize to 0-1 range
+        return min(1.0, combined)
+
+    def _build_spatial_index(self) -> tuple:
+        """Build spatial index for efficient proximity queries
+        
+        Returns:
+            tuple: (KDTree, list of node IDs, list of coordinates)
+        """
+        # Collect coordinates and IDs
+        coords = []
+        node_ids = []
+        
+        for node_id, node in self.nodes.items():
+            # Access node attributes directly
+            coords.append([node.longitude, node.latitude])
+            node_ids.append(node_id)
+            
+        # Build KDTree for efficient spatial queries
+        tree = cKDTree(coords)
+        return tree, node_ids, coords
+
+    def _propagate_scenic_scores(self) -> None:
+        """Propagate scenic scores from POIs to nearby roads"""
+        logger.info("Propagating scenic scores...")
+        
+        # Build spatial index
+        tree, node_ids, coords = self._build_spatial_index()
+        
+        # Get POI nodes and their scores
+        poi_nodes = {
+            node_id: self.graph.nodes[node_id].get('scenic_score', 0.0)
+            for node_id in self.nodes
+            if self.nodes[node_id].node_type == 'poi'
+        }
+        
+        # For each road segment
+        road_updates = {}
+        for node_id, node in self.nodes.items():
+            if node.node_type == 'junction':
+                # Find POIs within 250m
+                nearby_indices = tree.query_ball_point(
+                    [node.longitude, node.latitude], 
+                    r=0.00225  # Approximately 250m in degrees
+                )
+                
+                nearby_scores = []
+                for idx in nearby_indices:
+                    poi_id = node_ids[idx]
+                    if poi_id in poi_nodes:
+                        distance = self.haversine_distance(
+                            node.latitude, node.longitude,
+                            self.nodes[poi_id].latitude, 
+                            self.nodes[poi_id].longitude
+                        )
+                        
+                        # Calculate score contribution based on distance
+                        if distance <= 0.1:  # 100m
+                            score_contribution = poi_nodes[poi_id] * 0.5
+                        else:  # 100m-250m
+                            score_contribution = poi_nodes[poi_id] * 0.25
+                            
+                        nearby_scores.append(score_contribution)
+                
+                if nearby_scores:
+                    # Get base scenic value
+                    base_score = self.graph.nodes[node_id].get('scenic_value', 0.0)
+                    
+                    # Calculate combined score
+                    combined_score = self._calculate_combined_scenic_value(base_score, nearby_scores)
+                    
+                    # Store update
+                    road_updates[node_id] = combined_score
+        
+        # Apply updates
+        nx.set_node_attributes(self.graph, road_updates, 'scenic_value')
