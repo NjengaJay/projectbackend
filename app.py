@@ -5,42 +5,47 @@ from flask import Flask, jsonify, g
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
-import sqlite3
-
-# Add the backend directory to the Python path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
-
 from api.models import db
 from api.routes.auth import auth_bp
 from api.routes.chat import chat_bp
 from api.routes.accommodation import accommodation_bp
 from api.routes.favorites import favorites_bp
+from api.chatbot_handler import ChatbotHandler
+from api.travel_assistant import TravelAssistant
 
 def create_app():
     app = Flask(__name__)
     
-    # Configure SQLite database with absolute path to backend/instance/travel_assistant.db
-    db_path = os.path.join(os.path.dirname(__file__), 'instance', 'travel_assistant.db')
+    # Configure CORS with credentials support
+    CORS(app, 
+         resources={r"/api/*": {
+             "origins": ["http://localhost:3000"],
+             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+             "allow_headers": ["Content-Type", "Authorization"],
+             "supports_credentials": True,
+             "expose_headers": ["Authorization"]
+         }})
+    
+    # Database configuration - using absolute path
+    db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'instance', 'travel_assistant.db'))
     app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    
+    # JWT configuration
     app.config['JWT_SECRET_KEY'] = 'dev-secret-key'  # Change in production
     app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
+    app.config['JWT_TOKEN_LOCATION'] = ['headers', 'cookies']
+    app.config['JWT_COOKIE_CSRF_PROTECT'] = False
+    app.config['JWT_COOKIE_SECURE'] = False  # Set to True in production
     
-    # Initialize extensions with proper CORS configuration
-    CORS(app, 
-         resources={
-             r"/api/*": {
-                 "origins": ["http://localhost:3000"],
-                 "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-                 "allow_headers": ["Content-Type", "Authorization"]
-             }
-         },
-         supports_credentials=True)
-    
+    # Initialize extensions
     jwt = JWTManager(app)
     db.init_app(app)
     migrate = Migrate(app, db)
+    
+    # Initialize chatbot handler
+    chatbot_handler = ChatbotHandler()
+    travel_assistant = TravelAssistant(chatbot_handler.recommender)
     
     # Register blueprints
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
@@ -53,16 +58,9 @@ def create_app():
     def health_check():
         return jsonify({"status": "healthy"}), 200
         
-    def get_db():
-        db = getattr(g, '_database', None)
-        if db is None:
-            db = g._database = sqlite3.connect(app.config['SQLALCHEMY_DATABASE_URI'].replace('sqlite:///', ''))
-            db.execute("PRAGMA foreign_keys = ON")  # Enable foreign key support
-        return db
-
     @app.before_request
     def before_request():
-        g.db = get_db()
+        g.db = db.session
         
     return app
 

@@ -25,10 +25,11 @@ class User(db.Model):
     profile = db.relationship('UserProfile', back_populates='user', uselist=False, cascade='all, delete-orphan')
     chat_messages = db.relationship('ChatMessage', back_populates='user', lazy=True, cascade='all, delete-orphan')
     
-    def __init__(self, username, email, password):
+    def __init__(self, username, email, password=None):
         self.username = username
         self.email = email
-        self.set_password(password)
+        if password:
+            self.set_password(password)
     
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -62,7 +63,6 @@ class Trip(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     name = db.Column(db.String(100), nullable=False, server_default='My Trip')
     description = db.Column(db.Text)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     status = db.Column(db.String(20))
     itinerary = db.Column(db.JSON)
     route_details = db.Column(db.JSON)
@@ -83,7 +83,6 @@ class Trip(db.Model):
             'start_date': self.start_date.isoformat() if self.start_date else None,
             'end_date': self.end_date.isoformat() if self.end_date else None,
             'created_at': self.created_at.isoformat(),
-            'updated_at': self.updated_at.isoformat(),
             'status': self.status,
             'itinerary': self.itinerary or [],
             'route_details': self.route_details or {},
@@ -183,7 +182,6 @@ class Accommodation(db.Model):
     booking_conditions = db.Column(db.Text)  # Store as string, handle JSON in route
     accessibility_features = db.Column(db.Text)  # Store as string, handle JSON in route
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Link to the original POI if it exists
     destination_id = db.Column(db.Integer, db.ForeignKey('destinations.id', ondelete='SET NULL'), nullable=True)
@@ -222,7 +220,6 @@ class Accommodation(db.Model):
             'booking_conditions': safe_json_loads(self.booking_conditions, []),
             'accessibility_features': safe_json_loads(self.accessibility_features, {}),
             'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'destination_id': self.destination_id
         }
 
@@ -234,7 +231,6 @@ class UserProfile(db.Model):
     profile_picture = db.Column(db.String(500))
     bio = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     user = db.relationship('User', back_populates='profile')
@@ -246,8 +242,7 @@ class UserProfile(db.Model):
             'user_id': self.user_id,
             'profile_picture': self.profile_picture,
             'bio': self.bio,
-            'created_at': self.created_at.isoformat(),
-            'updated_at': self.updated_at.isoformat()
+            'created_at': self.created_at.isoformat()
         }
 
 class AccessibilityPreferences(db.Model):
@@ -259,7 +254,6 @@ class AccessibilityPreferences(db.Model):
     screen_reader = db.Column(db.Boolean)
     high_contrast = db.Column(db.Boolean)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     profile = db.relationship('UserProfile', back_populates='accessibility_preferences')
@@ -271,8 +265,7 @@ class AccessibilityPreferences(db.Model):
             'wheelchair_access': self.wheelchair_access,
             'screen_reader': self.screen_reader,
             'high_contrast': self.high_contrast,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+            'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
 class ChatSession(db.Model):
@@ -283,7 +276,6 @@ class ChatSession(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     context = db.Column(db.JSON)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     messages = db.relationship('ChatMessage', back_populates='session', lazy=True, cascade='all, delete-orphan')
