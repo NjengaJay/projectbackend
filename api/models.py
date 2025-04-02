@@ -24,6 +24,7 @@ class User(db.Model):
     favorites = db.relationship('Favorite', back_populates='user', lazy=True, cascade='all, delete-orphan')
     profile = db.relationship('UserProfile', back_populates='user', uselist=False, cascade='all, delete-orphan')
     chat_messages = db.relationship('ChatMessage', back_populates='user', lazy=True, cascade='all, delete-orphan')
+    reservations = db.relationship('Reservation', back_populates='user', lazy=True)
     
     def __init__(self, username, email, password=None):
         self.username = username
@@ -189,6 +190,7 @@ class Accommodation(db.Model):
     # Relationships
     destination = db.relationship('Destination', back_populates='accommodation')
     favorites = db.relationship('Favorite', back_populates='accommodation', lazy=True)
+    reservations = db.relationship('Reservation', back_populates='accommodation', lazy=True)
     
     def to_dict(self):
         """Convert accommodation to dictionary with safe JSON handling"""
@@ -345,3 +347,33 @@ class Favorite(db.Model):
     
     def __repr__(self):
         return f'<Favorite {self.id}: {self.type}>'
+
+class Reservation(db.Model):
+    __tablename__ = 'reservations'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    accommodation_id = db.Column(db.Integer, db.ForeignKey('accommodations.id', ondelete='CASCADE'), nullable=False)
+    check_in = db.Column(db.Date, nullable=False)
+    check_out = db.Column(db.Date, nullable=False)
+    guests = db.Column(db.Integer, nullable=False)
+    total_price = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(20), default='active')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', back_populates='reservations')
+    accommodation = db.relationship('Accommodation', back_populates='reservations')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'accommodation_id': self.accommodation_id,
+            'check_in': self.check_in.isoformat(),
+            'check_out': self.check_out.isoformat(),
+            'guests': self.guests,
+            'total_price': self.total_price,
+            'status': self.status,
+            'created_at': self.created_at.isoformat(),
+            'accommodation': self.accommodation.to_dict() if self.accommodation else None
+        }

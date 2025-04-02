@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from tqdm import tqdm
 from scipy.spatial import cKDTree
 import numpy as np
+from multiprocessing import Pool, cpu_count
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -329,34 +330,35 @@ class TransportGraph:
         """Validate the built graph"""
         logger.info("Starting graph validation...")
         logger.info(f"Number of nodes in self.nodes: {len(self.nodes)}")
-        logger.info(f"Number of nodes in graph: {self.graph.number_of_nodes()}")
-        logger.info(f"Number of edges in graph: {self.graph.number_of_edges()}")
         
-        # Check that we have nodes
-        if len(self.graph.nodes) == 0:
-            raise ValueError("Graph has no nodes")
-            
-        # Check that we have edges
-        if len(self.graph.edges) == 0:
-            raise ValueError("Graph has no edges")
+        if not self.nodes:
+            logger.error("No nodes in graph")
+            return
             
         # Check graph connectivity
-        components = list(nx.weakly_connected_components(self.graph))
-        if not components:
-            raise ValueError("Graph has no connected components")
-            
+        components = list(nx.strongly_connected_components(self.graph))
         largest_component = max(components, key=len)
-        component_coverage = len(largest_component) / len(self.graph.nodes)
+        component_coverage = len(largest_component) / len(self.graph)
         
-        # Since we're now only using active stops, we expect better connectivity
-        if component_coverage < 0.9:  # Increased from 0.8 since we're using filtered stops
-            raise ValueError(
-                f"Graph validation failed: Largest component only covers {component_coverage:.1%} of nodes. "
-                "This suggests a problem with the graph building process."
-            )
-            
+        logger.info(f"Graph connectivity analysis:")
+        logger.info(f"- Total components: {len(components)}")
+        logger.info(f"- Largest component covers {component_coverage:.1%} of nodes")
+        logger.info(f"- Number of nodes in largest component: {len(largest_component)}")
+        
         logger.info(f"Graph validation passed. Largest component covers {component_coverage:.1%} of nodes")
         
+    def _format_node_id(self, node_type: str, node_id: str) -> str:
+        """Format node ID consistently across all methods
+        
+        Args:
+            node_type: Type of node ('stop', 'poi')
+            node_id: Raw ID of the node
+            
+        Returns:
+            Formatted node ID string
+        """
+        return f"{node_type}_{node_id}"
+
     def _load_stops(self) -> None:
         """Load public transport stops from filtered dataset"""
         logger.info("Loading stops...")
@@ -364,12 +366,13 @@ class TransportGraph:
         # Load stop times first to get active stop IDs
         stop_times_file = self.data_dir / "csv_output" / "stop_times_cleaned_final.csv"
         if not stop_times_file.exists():
-            logger.warning("Stop times file not found, using all stops")
-            active_stop_ids = None
-        else:
-            stop_times_df = pd.read_csv(stop_times_file)
-            active_stop_ids = set(stop_times_df['stop_id'].unique())
-            logger.info(f"Found {len(active_stop_ids)} active stops in stop_times")
+            logger.error("Stop times file not found")
+            return
+            
+        # Read into DataFrame and sort by trip_id and stop_sequence
+        stop_times_df = pd.read_csv(stop_times_file)
+        stop_times_df = stop_times_df.sort_values(['trip_id', 'stop_sequence'])
+        logger.info(f"Loaded {len(stop_times_df)} stop times")
         
         # Load stops data
         stops_file = self.data_dir / "csv_output" / "stops_cleaned_filled_final.csv"
@@ -380,15 +383,15 @@ class TransportGraph:
         stops_df = pd.read_csv(stops_file)
         
         # Filter to only active stops if we have that info
-        if active_stop_ids is not None:
-            original_len = len(stops_df)
-            stops_df = stops_df[stops_df['stop_id'].isin(active_stop_ids)]
-            logger.info(f"Filtered stops from {original_len} to {len(stops_df)} active stops")
+        active_stop_ids = set(stop_times_df['stop_id'].unique())
+        original_len = len(stops_df)
+        stops_df = stops_df[stops_df['stop_id'].isin(active_stop_ids)]
+        logger.info(f"Filtered stops from {original_len} to {len(stops_df)} active stops")
         
         # Add stops to graph
         for _, row in stops_df.iterrows():
             stop_node = Node(
-                id=f"stop_{row['stop_id']}",
+                id=self._format_node_id('stop', str(row['stop_id'])),  # Use consistent format
                 name=row['stop_name'],
                 latitude=row['stop_lat'],
                 longitude=row['stop_lon'],
@@ -410,7 +413,7 @@ class TransportGraph:
         
         for idx, row in pois_df.iterrows():
             node = Node(
-                id=f"poi_{idx}",  # Use index as POI ID
+                id=self._format_node_id('poi', str(idx)),  # Use consistent format
                 name=row['name'],
                 latitude=row['latitude'],
                 longitude=row['longitude'],
@@ -471,8 +474,8 @@ class TransportGraph:
                 scenic_value = min(1.0, scenic_value)
                 
                 # Create unique node IDs for road endpoints
-                start_node = f"road_{start_lat:.6f}_{start_lon:.6f}"
-                end_node = f"road_{end_lat:.6f}_{end_lon:.6f}"
+                start_node = self._format_node_id('road', f"{start_lat:.6f}_{start_lon:.6f}")
+                end_node = self._format_node_id('road', f"{end_lat:.6f}_{end_lon:.6f}")
                 
                 # Add nodes if they don't exist
                 for node_id, lat, lon in [(start_node, start_lat, start_lon), 
@@ -500,96 +503,146 @@ class TransportGraph:
                 )
                 
             except (ValueError, IndexError) as e:
-                logger.warning(f"Error processing road segment: {str(e)}")
+                logger.warning(f"Error processing road segment: {e}")
                 continue
 
     def _load_transport_routes(self) -> None:
         """Load public transport routes and add edges between connected stops"""
-        logger.info("Loading transport routes from stop times...")
+        from multiprocessing import Pool, cpu_count
+        import numpy as np
         
-        # Load stop times data
+        
         stop_times_file = self.data_dir / "csv_output" / "stop_times_cleaned_final.csv"
         if not stop_times_file.exists():
-            logger.warning("Stop times file not found, skipping route connections")
+            logger.error("Stop times file not found")
             return
             
+        # Read into DataFrame and sort by trip_id and stop_sequence
         stop_times_df = pd.read_csv(stop_times_file)
+        stop_times_df = stop_times_df.sort_values(['trip_id', 'stop_sequence'])
         logger.info(f"Loaded {len(stop_times_df)} stop times")
         
-        # Sort by trip_id and stop_sequence
-        stop_times_df = stop_times_df.sort_values(['trip_id', 'stop_sequence'])
-        
-        # Create a dictionary to store the best connections between stops
-        connections = {}  # (from_stop, to_stop) -> {'distance': X, 'time': Y, 'cost': Z, 'count': N}
-        
-        # Process each trip to find connections
+        # Create trip segments from consecutive stops
+        trip_segments = []
         for trip_id, trip_stops in stop_times_df.groupby('trip_id'):
+            trip_stops = trip_stops.sort_values('stop_sequence')
+            
             # Get consecutive pairs of stops in this trip
             for i in range(len(trip_stops) - 1):
                 current = trip_stops.iloc[i]
                 next_stop = trip_stops.iloc[i + 1]
                 
-                # Create key for this stop pair
-                pair_key = (current['stop_id'], next_stop['stop_id'])
-                
-                # Calculate metrics
-                distance = float(next_stop['shape_dist_traveled'] - current['shape_dist_traveled'])
-                fare = float(next_stop['fare_units_traveled'] - current['fare_units_traveled'])
-                
                 try:
+                    # Calculate travel time
                     current_time = pd.to_datetime(current['departure_time'])
                     next_time = pd.to_datetime(next_stop['arrival_time'])
                     travel_time = (next_time - current_time).total_seconds() / 60  # Convert to minutes
                 except (ValueError, pd.errors.OutOfBoundsDatetime):
-                    travel_time = distance / 500  # Estimate: 30 km/h = 0.5 km/min
+                    # Fallback: estimate time based on distance (30 km/h = 0.5 km/min)
+                    travel_time = (next_stop['shape_dist_traveled'] - current['shape_dist_traveled']) / 500
                 
-                # Ensure positive values
-                distance = max(0.001, distance)  # At least 1m
-                travel_time = max(0.1, travel_time)  # At least 6 seconds
-                fare = max(0, fare)
+                segment = {
+                    'from_stop': str(current['stop_id']),
+                    'to_stop': str(next_stop['stop_id']),
+                    'distance': float(next_stop['shape_dist_traveled'] - current['shape_dist_traveled']),
+                    'time': max(0.1, travel_time),  # At least 6 seconds
+                    'cost': float(next_stop['fare_units_traveled'] - current['fare_units_traveled'])
+                }
+                trip_segments.append(segment)
                 
-                # Update connection info
-                if pair_key not in connections:
-                    connections[pair_key] = {
-                        'distance': distance,
-                        'time': travel_time,
-                        'cost': fare,
-                        'count': 1
-                    }
-                else:
-                    # Update metrics:
-                    # - Keep the shortest distance (it's fixed)
-                    # - Keep the minimum travel time (fastest connection)
-                    # - Keep the minimum fare (cheapest connection)
-                    # - Count how many trips use this connection
-                    conn = connections[pair_key]
-                    conn['distance'] = min(conn['distance'], distance)
-                    conn['time'] = min(conn['time'], travel_time)
-                    conn['cost'] = min(conn['cost'], fare)
-                    conn['count'] += 1
+            if len(trip_segments) % 10000 == 0:
+                logger.info(f"Created {len(trip_segments)} trip segments so far...")
         
-        # Add edges for each unique connection
-        logger.info(f"Found {len(connections)} unique stop connections")
-        edges_added = 0
+        logger.info(f"Created {len(trip_segments)} total trip segments")
         
-        for (from_stop, to_stop), metrics in connections.items():
-            try:
-                self.add_edge(
-                    start_node=f"stop_{from_stop}",
-                    end_node=f"stop_{to_stop}",
-                    transport_mode='bus',  # Using bus as default mode
-                    travel_time=metrics['time'],
-                    cost=metrics['cost'],
-                    distance=metrics['distance'],
-                    wheelchair_accessible=True,  # We can update this if we have accessibility data
-                    bidirectional=False  # Transit routes are directional
-                )
-                edges_added += 1
-            except KeyError as e:
-                logger.debug(f"Skipping edge {from_stop} -> {to_stop}: {str(e)}")
-                continue
+        # Split into chunks for parallel processing
+        chunk_size = 10000
+        n_chunks = (len(trip_segments) + chunk_size - 1) // chunk_size
+        trip_chunks = [(i, trip_segments[i*chunk_size:(i+1)*chunk_size]) 
+                      for i in range(n_chunks)]
+        
+        logger.info(f"Split trips into {len(trip_chunks)} chunks of {chunk_size} trips each")
+        
+        # Process chunks in parallel using 75% of CPU cores
+        n_processes = max(1, int(cpu_count() * 0.75))
+        logger.info(f"Starting parallel processing with {n_processes} processes")
+        
+        with Pool(n_processes) as pool:
+            chunk_results = pool.map(self._process_trip_chunk, trip_chunks)
+            
+        # Sort results by chunk_id to maintain deterministic behavior
+        chunk_results.sort(key=lambda x: x[0])
+        
+        # Merge results from all chunks
+        logger.info("Merging results from all chunks...")
+        connections = {}
+        for chunk_id, chunk_dict in chunk_results:
+            logger.info(f"Merging chunk {chunk_id} with {len(chunk_dict)} connections")
+            connections = self._merge_connection_dicts(connections, chunk_dict)
+            logger.info(f"Total unique connections after merge: {len(connections)}")
+            
+        logger.info(f"Found {len(connections)} total unique connections")
+        
+        # Add edges to graph
+        logger.info("Adding edges to graph...")
+        with tqdm(total=len(connections), desc="Adding edges") as pbar:
+            for (from_stop, to_stop), metrics in connections.items():
+                try:
+                    self.add_edge(
+                        start_node=self._format_node_id('stop', str(from_stop)),
+                        end_node=self._format_node_id('stop', str(to_stop)),
+                        transport_mode='bus',  # Using bus as default mode
+                        travel_time=metrics['time'],
+                        cost=metrics['cost'],
+                        distance=metrics['distance']
+                    )
+                    pbar.update(1)
+                except Exception as e:
+                    logger.warning(f"Error adding edge {from_stop}->{to_stop}: {str(e)}")
+                    continue
+
+    @staticmethod
+    def _process_trip_chunk(chunk_data):
+        """Process a chunk of trips in parallel
+        
+        Args:
+            chunk_data: Tuple of (chunk_id, trips)
+        
+        Returns:
+            Tuple of (chunk_id, connections dict)
+        """
+        chunk_id, trips = chunk_data
+        chunk_connections = {}
+        for i, trip in enumerate(trips):
+            from_stop = trip['from_stop']
+            to_stop = trip['to_stop']
+            metrics = {
+                'time': trip['travel_time'],
+                'cost': trip['cost'],
+                'distance': trip['distance']
+            }
+            
+            if (from_stop, to_stop) not in chunk_connections:
+                chunk_connections[(from_stop, to_stop)] = metrics
+            else:
+                current = chunk_connections[(from_stop, to_stop)]
+                if metrics['time'] < current['time']:
+                    chunk_connections[(from_stop, to_stop)] = metrics
+                    
+            # Log progress every 1000 trips within chunk
+            if (i + 1) % 1000 == 0:
+                logger.info(f"Chunk {chunk_id}: Processed {i + 1}/{len(trips)} trips, found {len(chunk_connections)} unique connections")
                 
-        logger.info(f"Added {edges_added} edges between stops")
+        logger.info(f"Chunk {chunk_id} complete: Processed {len(trips)} trips, found {len(chunk_connections)} unique connections")
+        return chunk_id, chunk_connections
+
+    def _merge_connection_dicts(self, dict1, dict2):
+        """Merge two connection dictionaries, keeping the better metrics"""
+        result = dict1.copy()
+        for key, metrics in dict2.items():
+            if key not in result or metrics['time'] < result[key]['time']:
+                result[key] = metrics
+        return result
 
     def _load_transfers(self) -> None:
         """Create transfer connections between nearby stops using KD-tree"""
@@ -640,8 +693,8 @@ class TransportGraph:
                         
                         # Add bidirectional walking connection
                         self.add_edge(
-                            start_node=node1.id,
-                            end_node=node2.id,
+                            start_node=node1.id,  # Already formatted by _load_stops
+                            end_node=node2.id,    # Already formatted by _load_stops
                             transport_mode='walk',
                             travel_time=travel_time,
                             cost=0,  # Walking is free

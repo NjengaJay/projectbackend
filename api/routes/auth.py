@@ -7,7 +7,7 @@ from flask_cors import cross_origin
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
 @auth_bp.route('/register', methods=['POST', 'OPTIONS'])
-@cross_origin()
+@cross_origin(supports_credentials=True)
 def register():
     if request.method == 'OPTIONS':
         return '', 200
@@ -45,7 +45,7 @@ def register():
         return jsonify({'message': str(e)}), 500
 
 @auth_bp.route('/login', methods=['POST', 'OPTIONS'])
-@cross_origin()
+@cross_origin(supports_credentials=True)
 def login():
     if request.method == 'OPTIONS':
         return '', 200
@@ -69,7 +69,7 @@ def login():
     }), 200
 
 @auth_bp.route('/validate', methods=['GET', 'OPTIONS'])
-@cross_origin()
+@cross_origin(supports_credentials=True)
 @jwt_required()
 def validate_token():
     if request.method == 'OPTIONS':
@@ -87,7 +87,7 @@ def validate_token():
     }), 200
 
 @auth_bp.route('/me', methods=['GET', 'OPTIONS'])
-@cross_origin()
+@cross_origin(supports_credentials=True)
 @jwt_required()
 def get_user():
     if request.method == 'OPTIONS':
@@ -99,4 +99,7 @@ def get_user():
     if not user:
         return jsonify({'message': 'User not found'}), 404
         
-    return jsonify(user.to_dict()), 200
+    return jsonify({
+        'message': 'Profile retrieved successfully',
+        'user': user.to_dict()
+    }), 200
